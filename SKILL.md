@@ -1,38 +1,99 @@
 ---
 name: geo-scrna-seuratv5-codegen
-description: Generate a high-readability Seurat v5 R pipeline from a scRNA-seq GEO accession, GEO URL, or SRA Selector URL, including GEO/SRA/PubMed metadata extraction, a named meta R vector, RNA contamination correction, QC, normalization, dimensionality reduction, and at least two merge/integration Seurat objects saved with qs.
+description: Generate a high-readability Seurat v5 R or R Markdown (Rmd) pipeline from a scRNA-seq GEO accession, GEO URL, or SRA Selector URL, including GEO/SRA/PubMed metadata extraction, named meta fields, RNA contamination correction, QC, DoubletFinder-based doublet removal, modular qread/qsave state handoff, and selectable RPCA/Harmony/BBKNN integration outputs saved with qs.
 ---
 
-# GEO scRNA-seq → Seurat v5 code generator
+# GEO scRNA-seq to Seurat v5 code generator
 
-Use this skill when the user gives a GEO accession, GEO page URL, SRA Selector URL, SRP/PRJNA/SRA accession, or article link and asks for R code to process a single-cell RNA-seq dataset into Seurat objects.
+Use this skill when the user gives a GEO accession, GEO page URL, SRA Selector URL, SRP/PRJNA/SRA accession, or article link and asks for Seurat v5 code to process a single-cell RNA-seq dataset into Seurat objects.
+
+Use this skill for both `.R` and `.Rmd` outputs.
 
 Do not use this skill for bulk RNA-seq, spatial transcriptomics, scATAC-only datasets, or non-R pipelines unless the user explicitly asks to adapt the workflow.
 
 ## Required user inputs before generation
 
-Before generating the R script, require the user to provide both:
+Before generating code, require the user to provide:
 
-1. A working directory path that will be written into the script and applied with `setwd(work_dir)`.
-2. A numeric seed value that will be written into the script and applied with `set.seed(seed)`.
+1. A working directory path that will be written into the code and applied with `setwd(work_dir)`.
+2. A numeric seed value that will be written into the code and applied with `set.seed(seed)`.
+3. An output format choice: `r` or `rmd`.
 
-If either value is missing, ask for it before writing the final code. Do not silently assume a default path or seed.
+If the user has not clearly chosen `r` or `rmd`, ask them to confirm the target format before generating code.
+
+If the user explicitly asks for both, generate both templates.
+
+Do not silently assume a default path, seed, or output format.
 
 ## Required final deliverable
 
-Produce a complete, directly runnable R script tailored to the dataset. The generated script must:
+Produce a complete, directly runnable Seurat v5 pipeline tailored to the dataset. The generated code must:
 
 1. Use **Seurat v5** as the main analysis framework.
-2. Use **qs** for all saved R objects. Use `qsave()` / `qread()`. Do not use `saveRDS()` / `readRDS()` for generated intermediate or final objects.
+2. Use **qs** for all generated intermediate and final R objects. Use `qsave()` / `qread()`. Do not use `saveRDS()` / `readRDS()` for pipeline state handoff.
 3. Return and save a named list called `seurat_results` whose elements are Seurat objects.
-4. Include at least two different merge/integration strategies, and save each corresponding Seurat object separately.
-5. Include a readable parameter block at the top so the user can easily modify `work_dir`, `seed`, QC cutoffs, dimensions, resolution, contamination method, and integration methods. The script must call both `setwd(work_dir)` and `set.seed(seed)`.
-6. Include a named R vector called `meta`, and when multiple samples exist also include `sample_meta` as a data frame.
-7. Implement the full processing flow: RNA contamination correction → basic QC → DoubletFinder-based doublet removal → normalization → HVG selection → scaling → PCA → UMAP → neighbors → clustering.
-8. Include verification code at the end: `stopifnot(inherits(..., "Seurat"))`, `print(seurat_results)`, and checks that `.qs` outputs exist.
-9. Add concise Chinese comments at key analysis steps, helper functions, and any place where parameter choices or assumptions need explanation.
-10. After completing each major section, remove large temporary variables that are no longer needed and run `gc()` to keep memory usage low.
-11. If the script needs to download public supplementary files, do not use `download.file()` or other R built-in download helpers. Use `axel` with 10 connections and the fixed proxy `http://www.cirno999.cn:12306`.
+4. Include separate, user-selectable downstream modules for:
+   - `merged_no_correction`
+   - `integrated_rpca`
+   - `integrated_harmony`
+   - `integrated_bbknn`
+5. Make the downstream integration modules independent, so the user can run any one or multiple modules without them affecting each other.
+6. Include a readable parameter block so the user can easily modify `work_dir`, `seed`, QC cutoffs, dimensions, resolution, contamination method, and integration settings.
+7. Include a named R vector called `meta`, and when multiple samples exist also include `sample_meta` as a data frame.
+8. Implement the full processing flow: RNA contamination correction -> basic QC -> DoubletFinder-based doublet removal -> normalization -> HVG selection -> scaling -> PCA -> UMAP -> neighbors -> clustering.
+9. Include verification code at the end: `stopifnot(inherits(..., "Seurat"))`, `print(seurat_results)`, and checks that generated `.qs` outputs exist.
+10. Add concise Chinese comments at key analysis steps, helper functions, and any place where parameter choices or assumptions need explanation.
+11. Remove large temporary variables after each major module and run `gc()` to keep memory usage low.
+12. If the script needs to download public supplementary files, do not use `download.file()` or other R built-in download helpers. Use `axel` with 10 connections and the fixed proxy `http://www.cirno999.cn:12306`.
+
+## Output format and modular execution requirements
+
+### R output requirements
+
+For `.R` output:
+
+- Use section dividers such as `# ---- 01. environment ----`.
+- Treat the script as a stepwise modular pipeline rather than one long sequential run.
+- The first environment/setup section should define paths, parameters, helper functions, package checks, and `state_paths`.
+- The first raw-file-processing module may read directly from raw files and write the first `.qs` state.
+- Every later module must:
+  1. Load its required upstream state with `qread()`.
+  2. Run only the logic for that module.
+  3. Save its output state with `qsave()`.
+  4. Clean up temporary objects with `cleanup_vars()` / `gc()`.
+- Use clear short titles before each module so the user can quickly jump to the relevant section.
+
+### Rmd output requirements
+
+For `.Rmd` output:
+
+- Start with a YAML header and a setup chunk.
+- Use one dedicated code chunk for environment setup: paths, parameters, helper functions, package checks, and `state_paths`.
+- Give every later analysis stage its own Markdown heading and its own code chunk.
+- Except for the initial raw-file-processing chunk, every later chunk must contain complete `qread()` input and `qsave()` output logic.
+- Include clear short Markdown titles before each chunk so the user can quickly move through the notebook.
+- Include at least one optional Python chunk placeholder with `eval=FALSE` so the user can add Python code when needed.
+- Make the RPCA, Harmony, and BBKNN chunks independent so the user can run any one or multiple integration chunks without cross-dependency.
+
+### Shared modular state requirements
+
+Both `.R` and `.Rmd` outputs must define a `state_paths` structure similar to:
+
+```r
+state_dir <- file.path(output_dir, "states")
+state_paths <- list(
+  object_list_raw = file.path(state_dir, paste0(project_id, "_01_object_list_raw.qs")),
+  object_list_contam = file.path(state_dir, paste0(project_id, "_02_object_list_contam.qs")),
+  obj_qc = file.path(state_dir, paste0(project_id, "_03_obj_qc.qs")),
+  obj_singlet_merged_raw = file.path(state_dir, paste0(project_id, "_04_obj_singlet_merged_raw.qs")),
+  obj_singlet_merged = file.path(state_dir, paste0(project_id, "_05_obj_singlet_merged.qs")),
+  merged_no_correction = file.path(state_dir, paste0(project_id, "_06_merged_no_correction.qs")),
+  integrated_rpca = file.path(state_dir, paste0(project_id, "_07_integrated_rpca.qs")),
+  integrated_harmony = file.path(state_dir, paste0(project_id, "_08_integrated_harmony.qs")),
+  integrated_bbknn = file.path(state_dir, paste0(project_id, "_09_integrated_bbknn.qs")),
+  seurat_results = file.path(state_dir, paste0(project_id, "_10_seurat_results.qs"))
+)
+```
 
 ## Required literature-derived integration logic
 
@@ -41,10 +102,10 @@ Use the user's uploaded benchmark article as the method-selection reference. Enc
 - Always generate an unintegrated / merge-only baseline object. It is required for detecting overcorrection and for inspecting whether biological differences are being erased.
 - Use highly variable gene selection before integration by default. The benchmark reports that HVG selection generally improves integration performance.
 - Treat scaling as useful but potentially overcorrecting: scaling can improve batch removal but may reduce biological signal conservation. Keep parameters explicit and avoid hiding this choice.
-- For an R/Seurat-v5-only deliverable, prefer `RPCAIntegration` and Harmony via `RunHarmony(obj, "sample")` as the default two integration methods, with `merged_no_correction` as the baseline.
+- Provide separate downstream modules for `RPCA`, `Harmony`, and `BBKNN` so the user can compare different correction strategies against the merge-only baseline.
 - For small/simple data with distinct biological signal, Harmony is acceptable and often convenient.
-- For strong or nested batch effects, include RPCA and Harmony outputs and instruct the user to compare both against the merge-only baseline.
-- Mention in comments that Scanorama, scVI/scANVI are strong choices in the benchmark, but do not make them default unless the user explicitly permits Python/reticulate or asks for non-Seurat-native methods.
+- For strong or nested batch effects, instruct the user to compare RPCA, Harmony, and BBKNN against the merge-only baseline rather than trusting a single corrected view.
+- Mention in comments that Scanorama, scVI/scANVI are strong choices in some benchmarks, but do not make them default unless the user explicitly permits Python/reticulate or asks for non-Seurat-native methods.
 - Do not integrate away biology: if sample type, tissue site, species, tumor/normal status, or disease group is the main biological contrast, do not set it as the only batch variable unless there are independent technical batch labels.
 
 ## Metadata retrieval requirements
@@ -63,7 +124,7 @@ Extract or infer:
 - `sample_id`: GSM/sample identifier or author-provided sample ID. Use `NA` if absent.
 - `sample_type`: `T` for tumor/primary tumor/metastasis tumor, `N` for normal/adjacent normal/non-tumor, `L` for lymph node/lymphatic tissue. Use `NA` if absent or ambiguous.
 
-The generated R script must define:
+The generated code must define:
 
 ```r
 meta <- c(
@@ -97,7 +158,7 @@ Tailor the code to the files that GEO/SRA provides. Do not output a generic read
 
 ## Download requirements
 
-When the generated script needs to download public GEO/SRA supplementary files, enforce the following rules:
+When the generated code needs to download public GEO/SRA supplementary files, enforce the following rules:
 
 - Do not use `download.file()`, `curl::curl_download()`, `wget`, or other R-native download helpers.
 - Use `axel` through `system2()` for all public file downloads.
@@ -141,28 +202,26 @@ Common cases:
 
 Cell barcodes must be made globally unique using sample IDs, e.g. `RenameCells(obj, add.cell.id = sample_id)` or `colnames(counts) <- paste(sample_id, colnames(counts), sep = "_")` before merging.
 
-## R script structure to generate
+## Pipeline structure to generate
 
-Generate the R script in this order:
+Generate the pipeline in this order:
 
 1. Header: dataset name, source URLs, article/PMID if used, and short assumptions.
-2. Package block with `require_or_stop()` and optional package messages.
-3. User parameter block, including `work_dir`, `seed`, `setwd(work_dir)`, and `set.seed(seed)`.
-4. `meta` vector and `sample_meta` table.
-5. Directory creation and qs path definitions.
-6. Dataset-tailored count readers.
-7. Seurat object construction per sample.
-8. RNA contamination correction.
-9. QC metrics and filtering.
-10. DoubletFinder workflow on split samples.
-11. Merge singlets and rerun the standard preprocessing workflow.
-12. Merge/integration method 1: merge-only baseline.
-13. Merge/integration method 2: Seurat v5 RPCA integration.
-14. Merge/integration method 3: Harmony integration when available; otherwise explicit fallback message and skip.
-15. Save each object with `qsave()`.
-16. Build `seurat_results <- list(...)` and save it with `qsave()`.
-17. Diagnostic plots saved to `output_dir/figures` with `ggsave()`.
-18. Final validation checks.
+2. Package block with `require_or_stop()`.
+3. Environment block: `work_dir`, `seed`, `setwd(work_dir)`, `set.seed(seed)`, path creation, helper functions, and `state_paths`.
+4. Raw input processing module.
+5. RNA contamination correction module.
+6. QC module.
+7. DoubletFinder module.
+8. Re-preprocessing module for merged singlets.
+9. Merge-only baseline module.
+10. RPCA module.
+11. Harmony module.
+12. BBKNN module.
+13. Optional Python placeholder chunk for `.Rmd`.
+14. Final results assembly module.
+15. Diagnostic plot module.
+16. Final validation module.
 
 ## RNA contamination correction rules
 
@@ -182,7 +241,7 @@ Use explicit, editable defaults unless the GEO article gives specific values:
 ```r
 min_features <- 200
 max_features <- 6000
-max_counts   <- Inf
+max_counts <- Inf
 max_percent_mt <- 20
 min_cells_per_gene <- 3
 n_hvg <- 3000
@@ -206,7 +265,7 @@ obj <- ScaleData(obj, vars.to.regress = c("nFeature_RNA", "nCount_RNA", "percent
 obj <- RunPCA(obj, features = VariableFeatures(obj), npcs = 40)
 ```
 
-Keep these defaults explicit in the script instead of hiding them behind vague wrappers.
+Keep these defaults explicit in the generated code.
 
 ## Dimension selection helper
 
@@ -231,166 +290,101 @@ calculate_min_pc <- function(obj, reduction = "harmony") {
 }
 ```
 
-Also add a small resolver such as `resolve_dims_use()` so the generated script can do `seq_len(calculate_min_pc(...))` when `dims_use` is not provided.
+Also add a small resolver such as `resolve_dims_use()` so the generated code can do `seq_len(calculate_min_pc(...))` when `dims_use` is not provided.
 
 ## DoubletFinder rules
 
-When the dataset has sample-level structure, generated scripts should remove doublets after QC and before the final merged/integration workflows. Use `sample` as the split field for this step.
+When the dataset has sample-level structure, generated code should remove doublets after QC and before the final merged/integration workflows. Use `sample` as the split field for this step.
 
 - Split the post-QC object with `SplitObject(obj, split.by = "sample")`.
 - Run DoubletFinder independently for each split sample, then extract only cells classified as `Singlet`.
-- Merge the singlet-only objects back together, call `JoinLayers()` when appropriate, and rerun the standard preprocessing workflow on the merged singlet object before any final downstream Harmony/RPCA/baseline analyses.
-- Keep this logic explicit in the script instead of hiding it in prose comments.
-
-Use the following parameterization and workflow as the default:
-
-```r
-multiplet_rates_10x <- data.frame(
-  Multiplet_rate = c(0.004, 0.008, 0.0160, 0.023, 0.031, 0.039, 0.046, 0.054, 0.061, 0.069, 0.076),
-  Loaded_cells = c(800, 1600, 3200, 4800, 6400, 8000, 9600, 11200, 12800, 14400, 16000),
-  Recovered_cells = c(500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000)
-)
-
-sample_obj <- SplitObject(obj, split.by = "sample")
-
-h <- lapply(names(sample_obj), function(n) {
-  o <- sample_obj[[n]]
-  o <- NormalizeData(o, normalization.method = "LogNormalize",
-                     scale.factor = 10000, margin = 1, assay = "RNA")
-  o <- FindVariableFeatures(o, nfeatures = 3000)
-  o <- ScaleData(o, vars.to.regress = c("nFeature_RNA", "nCount_RNA", "percent.mt"))
-  o <- RunPCA(o, features = VariableFeatures(o), npcs = 30)
-  min_pc <- calculate_min_pc(o, reduction = "pca")
-  o <- RunUMAP(o, reduction = "pca", dims = 1:min_pc)
-  o <- FindNeighbors(o, reduction = "pca", dims = 1:min_pc)
-  o <- FindClusters(o, resolution = 0.1)
-  sweep.res.hcc <- DoubletFinder::paramSweep(o, PCs = 1:min_pc, sct = FALSE)
-  sweep.stats <- DoubletFinder::summarizeSweep(sweep.res.hcc, GT = FALSE)
-  bcmvn <- DoubletFinder::find.pK(sweep.stats)
-  pK_bcmvn <- as.numeric(as.vector(bcmvn$pK[which.max(bcmvn$BCmetric)]))
-  homotypic.prop <- DoubletFinder::modelHomotypic(o$seurat_clusters)
-  multiplet_rate <- multiplet_rates_10x %>%
-    dplyr::filter(Recovered_cells < nrow(o@meta.data)) %>%
-    dplyr::slice(which.max(Recovered_cells)) %>%
-    dplyr::pull(Multiplet_rate)
-  nExp.poi <- round(multiplet_rate * nrow(o@meta.data))
-  nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
-  DoubletFinder::doubletFinder(
-    seu = o,
-    PCs = 1:min_pc,
-    pN = 0.25,
-    pK = pK_bcmvn,
-    nExp = nExp.poi.adj,
-    sct = FALSE
-  )
-})
-
-h.singlet <- lapply(names(sample_obj), function(n) {
-  o <- h[[n]]
-  colnames(o@meta.data)[grepl("DF.classifications", colnames(o@meta.data))] <- "doublet_finder"
-  subset(o, subset = doublet_finder == "Singlet")
-})
-
-obj_singlet_merged_raw <- if (length(h.singlet) == 1) {
-  h.singlet[[1]]
-} else {
-  merge(h.singlet[[1]], y = h.singlet[-1], add.cell.ids = names(h.singlet))
-}
-obj_singlet_merged_raw <- JoinLayers(obj_singlet_merged_raw)
-cleanup_vars(c("h", "h.singlet", "sample_obj"), envir = environment())
-obj_singlet_merged <- preprocess_standard(obj_singlet_merged_raw)
-```
-
-Additional requirements:
-
+- Merge the singlet-only objects back together, call `JoinLayers()` when appropriate, and rerun the standard preprocessing workflow on the merged singlet object before any final downstream analyses.
 - Add `DoubletFinder` to the package checks whenever this workflow is emitted.
 - Keep `pN = 0.25`, `sct = FALSE`, per-sample `RunPCA(..., npcs = 30)`, and `FindClusters(resolution = 0.1)` as the default DoubletFinder settings unless the source article justifies a change.
 - Rename the detected classification column to a stable name such as `doublet_finder` before subsetting singlets.
 - If only one sample exists, still run the same DoubletFinder logic on that single sample object.
 - Use Chinese comments to explain why doublet removal is done per sample before the final merged analysis.
 
-## Memory management requirements
+## BBKNN rules
 
-Generated scripts should actively control memory usage instead of waiting until the end.
+Add an independent BBKNN integration module.
 
-- Add a small helper such as `cleanup_vars()` that removes named objects if they exist and then calls `gc()`.
-- After finishing a major section, clear temporary matrices, temporary Seurat objects, temporary dimension vectors, and other no-longer-needed intermediates.
-- After per-sample objects have been merged into downstream objects and are no longer needed, clear `object_list` and any upstream raw-count containers when safe.
-- After creating the final `seurat_results` object and saving it, clear redundant standalone bindings that are already captured inside `seurat_results` when that does not break the remaining validation code.
-- Use concise Chinese comments to explain why a cleanup step is safe.
+- Load the upstream singlet-merged raw object with `qread(state_paths$obj_singlet_merged_raw)`.
+- Set `obj_bbknn$sample <- obj_bbknn$sample_id`.
+- Rerun the standard preprocessing workflow inside the BBKNN module so the module is independent.
+- Use `bbknnR::RunBBKNN()` as the default entry point.
+- Keep BBKNN package loading module-local rather than forcing it into the global package block, so users who do not run the BBKNN block are not blocked.
+- Save the BBKNN result to its own `.qs` file.
 
-## Seurat v5 integration templates
-
-Default baseline:
-
-```r
-obj_merged_no_correction <- obj_singlet_merged
-dims_pca <- if (is.null(dims_use)) seq_len(calculate_min_pc(obj_merged_no_correction, reduction = "pca")) else dims_use
-obj_merged_no_correction <- RunUMAP(obj_merged_no_correction, reduction = "pca", dims = dims_pca, reduction.name = "umap.unintegrated")
-obj_merged_no_correction <- FindNeighbors(obj_merged_no_correction, reduction = "pca", dims = dims_pca)
-obj_merged_no_correction <- FindClusters(obj_merged_no_correction, resolution = cluster_resolution)
-```
-
-Default Seurat v5 RPCA integration:
+Use a template similar to:
 
 ```r
-obj_rpca <- obj_singlet_merged_raw
-obj_rpca[["RNA"]] <- split(obj_rpca[["RNA"]], f = obj_rpca$sample_id)
-obj_rpca$sample <- obj_rpca$sample_id
-obj_rpca <- preprocess_standard(obj_rpca)
-obj_rpca <- IntegrateLayers(
-  object = obj_rpca,
-  method = RPCAIntegration,
-  orig.reduction = "pca",
-  new.reduction = "integrated.rpca",
+require_or_stop("bbknnR")
+obj_bbknn <- qread(state_paths$obj_singlet_merged_raw)
+obj_bbknn$sample <- obj_bbknn$sample_id
+obj_bbknn <- preprocess_standard(obj_bbknn)
+dims_bbknn <- if (is.null(dims_use)) calculate_min_pc(obj_bbknn, reduction = "pca") else max(dims_use)
+obj_bbknn <- bbknnR::RunBBKNN(
+  object = obj_bbknn,
+  batch_key = "sample",
+  reduction = "pca",
+  n_pcs = dims_bbknn,
+  graph_name = "bbknn",
+  run_TSNE = FALSE,
+  run_UMAP = TRUE,
+  UMAP_name = "umap.bbknn",
+  seed = seed,
   verbose = FALSE
 )
-obj_rpca <- JoinLayers(obj_rpca)
-dims_rpca <- if (is.null(dims_use)) seq_len(calculate_min_pc(obj_rpca, reduction = "integrated.rpca")) else dims_use
-obj_rpca <- FindNeighbors(obj_rpca, reduction = "integrated.rpca", dims = dims_rpca)
-obj_rpca <- RunUMAP(obj_rpca, reduction = "integrated.rpca", dims = dims_rpca, reduction.name = "umap.rpca")
-obj_rpca <- FindClusters(obj_rpca, resolution = cluster_resolution)
+obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolution)
+qsave(obj_bbknn, state_paths$integrated_bbknn)
 ```
-
-Default Harmony integration:
-
-```r
-obj_harmony <- obj_singlet_merged_raw
-obj_harmony$sample <- obj_harmony$sample_id
-obj_harmony <- preprocess_standard(obj_harmony)
-obj_harmony <- RunHarmony(obj_harmony, "sample")
-dims_harmony <- if (is.null(dims_use)) seq_len(calculate_min_pc(obj_harmony, reduction = "harmony")) else dims_use
-obj_harmony <- FindNeighbors(obj_harmony, reduction = "harmony", dims = dims_harmony)
-obj_harmony <- RunUMAP(obj_harmony, reduction = "harmony", dims = dims_harmony, reduction.name = "umap.harmony")
-obj_harmony <- FindClusters(obj_harmony, resolution = cluster_resolution)
-```
-
-If `RunHarmony()` is unavailable in the user's installed Seurat/Harmony setup, generate a clear message and skip the Harmony object rather than failing after the RPCA object has been created.
 
 ## Output object contract
 
-The final generated script must end with a result list similar to:
+The final results-assembly module must collect whichever downstream result files the user has actually generated.
+
+Do not require the user to run all downstream integration modules before assembling results.
+
+Use a pattern similar to:
 
 ```r
-seurat_results <- list(
-  merged_no_correction = obj_merged_no_correction,
-  integrated_rpca = obj_rpca,
-  integrated_harmony = obj_harmony
+result_files <- c(
+  merged_no_correction = state_paths$merged_no_correction,
+  integrated_rpca = state_paths$integrated_rpca,
+  integrated_harmony = state_paths$integrated_harmony,
+  integrated_bbknn = state_paths$integrated_bbknn
 )
 
-qsave(seurat_results, file.path(output_dir, paste0(project_id, "_seurat_results.qs")))
+seurat_results <- Filter(
+  Negate(is.null),
+  lapply(names(result_files), function(nm) {
+    if (file.exists(result_files[[nm]])) qread(result_files[[nm]]) else NULL
+  })
+)
+names(seurat_results) <- names(result_files)
+seurat_results <- Filter(Negate(is.null), seurat_results)
 ```
 
-If one optional method was skipped, omit it from the list using `Filter(Negate(is.null), ...)` but keep at least two Seurat objects in the list.
+If no downstream result files exist, stop with a clear message.
+
+## Memory management requirements
+
+Generated code should actively control memory usage instead of waiting until the end.
+
+- Add a small helper such as `cleanup_vars()` that removes named objects if they exist and then calls `gc()`.
+- After finishing a major module, clear temporary matrices, temporary Seurat objects, temporary dimension vectors, and other no-longer-needed intermediates.
+- After state has been handed off with `qsave()`, clean up the in-memory copy when safe.
+- After creating the final `seurat_results` object and saving it, clear redundant standalone bindings that are already captured inside `seurat_results` when that does not break the remaining validation code.
+- Use concise Chinese comments to explain why a cleanup step is safe.
 
 ## Readability requirements
 
-- Use section dividers such as `# ---- 01. packages ----`.
+- Use short, clear titles before every section or chunk.
 - Use small helper functions with explicit names.
 - Do not compress the workflow into one long pipe.
 - Add comments explaining why each major step exists, and use concise Chinese comments where a human reader is likely to need clarification.
-- Insert explicit memory-cleanup blocks between major sections rather than leaving all intermediates in memory.
-- Keep all key thresholds in the parameter block; do not hard-code them in functions.
+- Keep all key thresholds in the parameter block; do not hard-code them inside downstream modules.
 - Never overwrite output files without making it clear where they are saved.
 
 ## Safety and reproducibility requirements
@@ -405,4 +399,4 @@ If one optional method was skipped, omit it from the list using `Filter(Negate(i
 
 ## When uncertain
 
-If metadata or file format is ambiguous after searching GEO/SRA/article sources, do not fabricate. Use `"NA"` for missing metadata and add a short `assumptions` comment in the R script explaining exactly what is uncertain and what the user should verify.
+If metadata or file format is ambiguous after searching GEO/SRA/article sources, do not fabricate. Use `"NA"` for missing metadata and add a short `assumptions` comment in the code explaining exactly what is uncertain and what the user should verify.

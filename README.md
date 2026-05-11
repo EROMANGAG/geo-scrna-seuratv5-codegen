@@ -1,6 +1,6 @@
 # geo-scrna-seuratv5-codegen
 
-Codex skill for generating readable Seurat v5 R pipelines from GEO/SRA scRNA-seq datasets.
+Codex skill for generating readable Seurat v5 `R` or `Rmd` pipelines from GEO/SRA scRNA-seq datasets.
 
 ## Install
 
@@ -23,5 +23,5 @@ Restart Codex if the skill does not appear.
 ## Example prompt
 
 ```text
-Use $geo-scrna-seuratv5-codegen to generate a Seurat v5 R script for https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSEXXXXXX
+Use $geo-scrna-seuratv5-codegen to generate a Seurat v5 R or Rmd pipeline for https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSEXXXXXX
 ```

@@ -1,7 +1,11 @@
-# Template only: Codex should tailor this script to the current GEO dataset.
-# The generated script must replace all <PLACEHOLDER> values after inspecting GEO/SRA/article metadata.
+---
+title: "Seurat v5 scRNA-seq pipeline"
+output: html_document
+---
 
-# ---- 00. project metadata ----
+## 00. Project Metadata
+
+```{r project-metadata}
 project_id <- "<GSEID>"
 
 meta <- c(
@@ -21,11 +25,16 @@ sample_meta <- data.frame(
   platform = c("<PLATFORM_OR_NA>"),
   stringsAsFactors = FALSE
 )
+```
 
-# ---- 01. environment and helpers ----
+## 01. Environment Setup
+
+```{r environment-setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
 require_or_stop <- function(pkg) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
-    stop(sprintf("Package '%s' is required. Install it before running this script.", pkg), call. = FALSE)
+    stop(sprintf("Package '%s' is required. Install it before running this notebook.", pkg), call. = FALSE)
   }
 }
 
@@ -64,7 +73,7 @@ npcs <- 40
 vars_to_regress <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
 cluster_resolution <- 0.5
 mt_pattern <- "^MT-"
-contamination_method <- "auto" # auto, soupx, decontx, none
+contamination_method <- "auto"
 run_doubletfinder <- TRUE
 doubletfinder_pN <- 0.25
 doubletfinder_npcs <- 30
@@ -100,7 +109,6 @@ cleanup_vars <- function(var_names, envir = .GlobalEnv) {
   invisible(gc())
 }
 
-# 中文注释：公共数据下载统一使用 axel，不使用 R 内置下载函数
 download_with_axel <- function(url, dest_path) {
   dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
   status <- system2(
@@ -118,7 +126,6 @@ download_with_axel <- function(url, dest_path) {
   dest_path
 }
 
-# 中文注释：当用户没有显式给出 dims_use 时，按拐点和累计贡献率自动确定主成分数
 calculate_min_pc <- function(obj, reduction = "harmony") {
   stdv <- obj[[reduction]]@stdev
   percent_stdv <- (stdv / sum(stdv)) * 100
@@ -143,7 +150,6 @@ resolve_dims_use <- function(obj, reduction = "harmony") {
   seq_len(calculate_min_pc(obj, reduction = reduction))
 }
 
-# 中文注释：标准预处理流程固定采用技能约定的参数
 preprocess_standard <- function(obj, npcs_use = npcs) {
   obj <- NormalizeData(obj, normalization.method = "LogNormalize",
                        scale.factor = 10000, margin = 1, assay = "RNA")
@@ -167,22 +173,18 @@ run_doubletfinder_one_sample <- function(o) {
   o <- FindVariableFeatures(o, nfeatures = n_hvg)
   o <- ScaleData(o, vars.to.regress = vars_to_regress)
   o <- RunPCA(o, features = VariableFeatures(o), npcs = doubletfinder_npcs)
-
   min_pc <- calculate_min_pc(o, reduction = "pca")
   o <- RunUMAP(o, reduction = "pca", dims = 1:min_pc)
   o <- FindNeighbors(o, reduction = "pca", dims = 1:min_pc)
   o <- FindClusters(o, resolution = doubletfinder_resolution)
-
   sweep.res.hcc <- DoubletFinder::paramSweep(o, PCs = 1:min_pc, sct = FALSE)
   sweep.stats <- DoubletFinder::summarizeSweep(sweep.res.hcc, GT = FALSE)
   bcmvn <- DoubletFinder::find.pK(sweep.stats)
   pK_bcmvn <- as.numeric(as.vector(bcmvn$pK[which.max(bcmvn$BCmetric)]))
-
   homotypic.prop <- DoubletFinder::modelHomotypic(o$seurat_clusters)
   multiplet_rate <- estimate_multiplet_rate(nrow(o@meta.data))
   nExp.poi <- round(multiplet_rate * nrow(o@meta.data))
   nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
-
   DoubletFinder::doubletFinder(
     seu = o,
     PCs = 1:min_pc,
@@ -194,35 +196,26 @@ run_doubletfinder_one_sample <- function(o) {
 }
 
 remove_doublets_by_sample <- function(obj) {
-  # 中文注释：双细胞按样本分别检测，可以减少不同样本混合带来的参数偏移
   sample_obj <- SplitObject(obj, split.by = "sample")
-
-  h <- lapply(names(sample_obj), function(n) {
-    run_doubletfinder_one_sample(sample_obj[[n]])
-  })
+  h <- lapply(names(sample_obj), function(n) run_doubletfinder_one_sample(sample_obj[[n]]))
   names(h) <- names(sample_obj)
-
   h.singlet <- lapply(names(sample_obj), function(n) {
     o <- h[[n]]
     colnames(o@meta.data)[grepl("DF.classifications", colnames(o@meta.data))] <- "doublet_finder"
     subset(o, subset = doublet_finder == "Singlet")
   })
   names(h.singlet) <- names(sample_obj)
-
   if (length(h.singlet) == 1) {
     singlet_merged <- h.singlet[[1]]
   } else {
     singlet_merged <- merge(h.singlet[[1]], y = h.singlet[-1], add.cell.ids = names(h.singlet))
   }
   singlet_merged <- JoinLayers(singlet_merged)
-
-  # 中文注释：单细胞结果已经合并完成，可释放 DoubletFinder 中间对象
   cleanup_vars(c("h", "h.singlet", "sample_obj"), envir = environment())
   singlet_merged
 }
 
 run_contamination_correction <- function(obj) {
-  # 中文注释：优先使用 SoupX；若只有 filtered matrix，可选 DecontX；都不可用时明确跳过
   obj
 }
 
@@ -244,19 +237,25 @@ collect_seurat_results <- function() {
     integrated_harmony = state_paths$integrated_harmony,
     integrated_bbknn = state_paths$integrated_bbknn
   )
-
   out <- lapply(names(result_files), function(nm) {
-    if (file.exists(result_files[[nm]])) {
-      qread(result_files[[nm]])
-    } else {
-      NULL
-    }
+    if (file.exists(result_files[[nm]])) qread(result_files[[nm]]) else NULL
   })
   names(out) <- names(result_files)
   Filter(Negate(is.null), out)
 }
+```
 
-# ---- 02. raw input processing module ----
+## 02. Optional Python Placeholder
+
+```{python, eval=FALSE}
+# Add optional Python code here when needed.
+# Example: helper scripts for file preprocessing or external QC.
+print("python chunk ready")
+```
+
+## 03. Raw Input Processing
+
+```{r raw-input-processing}
 # 中文注释：这里必须替换为与 GEO 文件格式匹配的读取逻辑；如果需要下载公开补充文件，请调用 download_with_axel()
 read_one_sample <- function(sample_id, path) {
   counts <- Read10X(data.dir = path)
@@ -278,31 +277,44 @@ read_one_sample <- function(sample_id, path) {
 # object_list <- setNames(lapply(names(sample_paths), function(x) read_one_sample(x, sample_paths[[x]])), names(sample_paths))
 # qsave(object_list, state_paths$object_list_raw)
 # cleanup_vars(c("object_list", "sample_paths"))
+```
 
-# ---- 03. contamination correction module ----
+## 04. RNA Contamination Correction
+
+```{r contamination-correction}
 # object_list <- qread(state_paths$object_list_raw)
 # object_list <- lapply(object_list, run_contamination_correction)
 # qsave(object_list, state_paths$object_list_contam)
 # cleanup_vars(c("object_list"))
+```
 
-# ---- 04. QC module ----
+## 05. QC Filtering
+
+```{r qc-filtering}
 # object_list <- qread(state_paths$object_list_contam)
 # qc_list <- lapply(object_list, qc_filter_one)
 # obj_qc <- if (length(qc_list) == 1) qc_list[[1]] else merge(qc_list[[1]], y = qc_list[-1], add.cell.ids = names(qc_list))
 # obj_qc <- JoinLayers(obj_qc)
 # qsave(obj_qc, state_paths$obj_qc)
 # cleanup_vars(c("object_list", "qc_list", "obj_qc"))
+```
 
-# ---- 05. DoubletFinder module ----
+## 06. DoubletFinder Removal
+
+```{r doubletfinder-removal}
+# 中文注释：该模块按样本分别去除双细胞，再重新合并
 # obj_qc <- qread(state_paths$obj_qc)
 # obj_singlet_merged_raw <- if (run_doubletfinder) remove_doublets_by_sample(obj_qc) else obj_qc
 # qsave(obj_singlet_merged_raw, state_paths$obj_singlet_merged_raw)
 # obj_singlet_merged <- preprocess_standard(obj_singlet_merged_raw)
 # qsave(obj_singlet_merged, state_paths$obj_singlet_merged)
 # cleanup_vars(c("obj_qc", "obj_singlet_merged_raw", "obj_singlet_merged"))
+```
 
-# ---- 06. merge-only baseline module ----
-# 中文注释：该模块只依赖去双后的标准预处理对象，可单独运行
+## 07. Merge-only Baseline
+
+```{r merge-only-baseline}
+# 中文注释：该模块可单独运行，只依赖去双后的标准预处理对象
 # obj_merged_no_correction <- qread(state_paths$obj_singlet_merged)
 # dims_pca <- resolve_dims_use(obj_merged_no_correction, reduction = "pca")
 # obj_merged_no_correction <- RunUMAP(obj_merged_no_correction, reduction = "pca", dims = dims_pca, reduction.name = "umap.unintegrated")
@@ -310,9 +322,12 @@ read_one_sample <- function(sample_id, path) {
 # obj_merged_no_correction <- FindClusters(obj_merged_no_correction, resolution = cluster_resolution)
 # qsave(obj_merged_no_correction, state_paths$merged_no_correction)
 # cleanup_vars(c("obj_merged_no_correction", "dims_pca"))
+```
 
-# ---- 07. RPCA integration module ----
-# 中文注释：RPCA 模块从去双后的原始合并对象重新开始，不依赖其他整合模块
+## 08. RPCA Integration
+
+```{r rpca-integration}
+# 中文注释：RPCA 模块独立读取上游状态，不依赖 Harmony 或 BBKNN
 # obj_rpca <- qread(state_paths$obj_singlet_merged_raw)
 # obj_rpca[["RNA"]] <- split(obj_rpca[["RNA"]], f = obj_rpca$sample_id)
 # obj_rpca$sample <- obj_rpca$sample_id
@@ -331,9 +346,12 @@ read_one_sample <- function(sample_id, path) {
 # obj_rpca <- FindClusters(obj_rpca, resolution = cluster_resolution)
 # qsave(obj_rpca, state_paths$integrated_rpca)
 # cleanup_vars(c("obj_rpca", "dims_rpca"))
+```
 
-# ---- 08. Harmony integration module ----
-# 中文注释：Harmony 模块同样独立运行，不依赖 RPCA 或 BBKNN 输出
+## 09. Harmony Integration
+
+```{r harmony-integration}
+# 中文注释：Harmony 模块同样独立运行
 # require_or_stop("harmony")
 # obj_harmony <- qread(state_paths$obj_singlet_merged_raw)
 # obj_harmony$sample <- obj_harmony$sample_id
@@ -346,9 +364,12 @@ read_one_sample <- function(sample_id, path) {
 # obj_harmony <- FindClusters(obj_harmony, resolution = cluster_resolution)
 # qsave(obj_harmony, state_paths$integrated_harmony)
 # cleanup_vars(c("obj_harmony", "dims_harmony"))
+```
 
-# ---- 09. BBKNN integration module ----
-# 中文注释：BBKNN 模块单独读取上游状态，因此可与 RPCA / Harmony 任意组合运行
+## 10. BBKNN Integration
+
+```{r bbknn-integration}
+# 中文注释：BBKNN 模块独立读取上游状态，因此可与 RPCA / Harmony 任意组合运行
 # require_or_stop("bbknnR")
 # obj_bbknn <- qread(state_paths$obj_singlet_merged_raw)
 # obj_bbknn$sample <- obj_bbknn$sample_id
@@ -369,8 +390,11 @@ read_one_sample <- function(sample_id, path) {
 # obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolution)
 # qsave(obj_bbknn, state_paths$integrated_bbknn)
 # cleanup_vars(c("obj_bbknn", "dims_bbknn"))
+```
 
-# ---- 10. diagnostic plots module ----
+## 11. Diagnostic Plots
+
+```{r diagnostic-plots}
 # result_files <- c(
 #   merged_no_correction = state_paths$merged_no_correction,
 #   integrated_rpca = state_paths$integrated_rpca,
@@ -384,16 +408,22 @@ read_one_sample <- function(sample_id, path) {
 #   ggsave(file.path(fig_dir, paste0(project_id, "_", nm, "_sample_umap.png")), plot = p, width = 8, height = 6)
 #   cleanup_vars(c("obj_plot", "p"))
 # }
+```
 
-# ---- 11. final results assembly module ----
+## 12. Final Results Assembly
+
+```{r final-results-assembly}
 # seurat_results <- collect_seurat_results()
 # if (length(seurat_results) == 0) {
 #   stop("No downstream result files were found. Run at least one baseline/integration module first.", call. = FALSE)
 # }
 # qsave(seurat_results, state_paths$seurat_results)
 # cleanup_vars(c("seurat_results"))
+```
 
-# ---- 12. final validation module ----
+## 13. Final Validation
+
+```{r final-validation}
 # seurat_results <- qread(state_paths$seurat_results)
 # print(seurat_results)
 # stopifnot(length(seurat_results) >= 1)
@@ -401,3 +431,4 @@ read_one_sample <- function(sample_id, path) {
 # stopifnot(file.exists(state_paths$seurat_results))
 # writeLines(capture.output(sessionInfo()), con = state_paths$session_info)
 # cleanup_vars(c("seurat_results"))
+```
