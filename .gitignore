@@ -1,0 +1,18 @@
+# R session artifacts
+.Rhistory
+.RData
+.Ruserdata
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+
+# Generated analysis outputs
+data/
+output/
+
+# Temporary archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
