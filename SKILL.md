@@ -247,15 +247,11 @@ Include this step before QC filtering.
 corrected <- lapply(names(object_list), function(n) {
   obj <- object_list[[n]]
   sce <- SingleCellExperiment::SingleCellExperiment(
-    assays = list(counts = GetAssayData(obj, assay = "RNA", layer = "counts"))
+    assays = list(counts = LayerData(obj, assay = "RNA", layer = "counts"))
   )
   sce <- celda::decontX(sce)
   corrected_counts <- celda::decontXcounts(sce)
-  obj[["RNA"]] <- if ("CreateAssay5Object" %in% getNamespaceExports("SeuratObject")) {
-    SeuratObject::CreateAssay5Object(counts = corrected_counts)
-  } else {
-    CreateAssayObject(counts = corrected_counts)
-  }
+  obj[["RNA"]] <- SeuratObject::CreateAssay5Object(counts = corrected_counts)
   obj <- add_sample_metadata(obj, sample_meta[sample_meta$sample_id == n, , drop = FALSE][1, ])
   cleanup_vars(c("sce", "corrected_counts"))
   obj
@@ -266,6 +262,17 @@ corrected <- lapply(names(object_list), function(n) {
 - Add a small helper such as `add_sample_metadata()` so each corrected object gets the expected sample metadata back after the RNA assay is replaced.
 
 Use comments to tell the user that contamination correction can alter low-expression markers and should be checked against canonical marker genes.
+
+## Seurat v5 compatibility rules
+
+Generated code must target `Seurat > 5.0.0` and `SeuratObject > 5.0.0`.
+
+- Add an explicit version check near the package block and stop early if either package is `<= 5.0.0`.
+- Do not generate `FetchData(..., slot = ...)`; always use `FetchData(..., layer = ..., assay = ...)` when expression data must be fetched.
+- Do not generate `GetAssayData(..., slot = ...)` or `SetAssayData(..., slot = ...)`.
+- Prefer `LayerData()` and `LayerData<-` for expression matrix access in Seurat v5 style code.
+- Do not generate `CreateAssayObject()` fallback branches for legacy Seurat versions; use `SeuratObject::CreateAssay5Object()` directly.
+- If a helper or code block was originally written for Seurat v4 or older, rewrite it to v5-compatible layer semantics before emitting the final script.
 
 ## QC defaults
 

@@ -29,8 +29,17 @@ require_or_stop <- function(pkg) {
   }
 }
 
-required_packages <- c("Seurat", "qs", "Matrix", "data.table", "dplyr", "ggplot2", "DoubletFinder")
+require_version_gt <- function(pkg, min_version) {
+  require_or_stop(pkg)
+  if (utils::compareVersion(as.character(utils::packageVersion(pkg)), min_version) <= 0) {
+    stop(sprintf("Package '%s' must be > %s for this Seurat v5 pipeline.", pkg, min_version), call. = FALSE)
+  }
+}
+
+required_packages <- c("Seurat", "SeuratObject", "qs", "Matrix", "data.table", "dplyr", "ggplot2", "DoubletFinder")
 invisible(lapply(required_packages, require_or_stop))
+require_version_gt("Seurat", "5.0.0")
+require_version_gt("SeuratObject", "5.0.0")
 
 library(Seurat)
 library(qs)
@@ -291,15 +300,11 @@ run_contamination_correction <- function(object_list) {
     corrected <- lapply(names(object_list), function(n) {
       obj <- object_list[[n]]
       sce <- SingleCellExperiment::SingleCellExperiment(
-        assays = list(counts = GetAssayData(obj, assay = "RNA", layer = "counts"))
+        assays = list(counts = LayerData(obj, assay = "RNA", layer = "counts"))
       )
       sce <- celda::decontX(sce)
       corrected_counts <- celda::decontXcounts(sce)
-      obj[["RNA"]] <- if ("CreateAssay5Object" %in% getNamespaceExports("SeuratObject")) {
-        SeuratObject::CreateAssay5Object(counts = corrected_counts)
-      } else {
-        CreateAssayObject(counts = corrected_counts)
-      }
+      obj[["RNA"]] <- SeuratObject::CreateAssay5Object(counts = corrected_counts)
       obj <- add_sample_metadata(obj, sample_meta[sample_meta$sample_id == n, , drop = FALSE][1, , drop = FALSE])
       cleanup_vars(c("sce", "corrected_counts"), envir = environment())
       obj
