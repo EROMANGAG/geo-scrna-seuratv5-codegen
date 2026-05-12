@@ -82,6 +82,7 @@ doubletfinder_npcs <- 30
 doubletfinder_resolution <- 0.1
 axel_proxy <- "http://www.cirno999.cn:12306"
 axel_connections <- 10
+check_existing_downloads <- TRUE
 
 # SingleR 上游结果可选，复制其中一个即可：
 # "merged_no_correction"
@@ -128,8 +129,12 @@ qread_or_stop <- function(path, label = basename(path)) {
   qread(path)
 }
 
-download_with_axel <- function(url, dest_path) {
+download_with_axel <- function(url, dest_path, check_existing = check_existing_downloads) {
   dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
+  # 如果原始文件已经存在，可以直接跳过重复下载。
+  if (isTRUE(check_existing) && file.exists(dest_path)) {
+    return(dest_path)
+  }
   status <- system2(
     "axel",
     args = c("-n", as.character(axel_connections), "-o", dest_path, url),
@@ -143,6 +148,20 @@ download_with_axel <- function(url, dest_path) {
     stop(sprintf("axel download failed for: %s", url), call. = FALSE)
   }
   dest_path
+}
+
+add_sample_metadata <- function(obj, one_meta) {
+  if (nrow(one_meta) != 1) {
+    stop("add_sample_metadata() expects exactly one metadata row per sample.", call. = FALSE)
+  }
+  for (nm in colnames(one_meta)) {
+    obj[[nm]] <- one_meta[[nm]][1]
+  }
+  if ("sample_id" %in% colnames(one_meta)) {
+    obj$sample_id <- one_meta$sample_id[1]
+    obj$sample <- one_meta$sample_id[1]
+  }
+  obj
 }
 
 calculate_min_pc <- function(obj, reduction = "harmony") {
@@ -262,10 +281,34 @@ remove_doublets_by_sample <- function(obj) {
   singlet_merged
 }
 
-run_contamination_correction <- function(obj) {
+run_contamination_correction <- function(object_list) {
+  if (identical(contamination_method, "none")) {
+    return(object_list)
+  }
+  if (identical(contamination_method, "decontx")) {
+    require_or_stop("celda")
+    require_or_stop("SingleCellExperiment")
+    corrected <- lapply(names(object_list), function(n) {
+      obj <- object_list[[n]]
+      sce <- SingleCellExperiment::SingleCellExperiment(
+        assays = list(counts = GetAssayData(obj, assay = "RNA", layer = "counts"))
+      )
+      sce <- celda::decontX(sce)
+      corrected_counts <- celda::decontXcounts(sce)
+      obj[["RNA"]] <- if ("CreateAssay5Object" %in% getNamespaceExports("SeuratObject")) {
+        SeuratObject::CreateAssay5Object(counts = corrected_counts)
+      } else {
+        CreateAssayObject(counts = corrected_counts)
+      }
+      obj <- add_sample_metadata(obj, sample_meta[sample_meta$sample_id == n, , drop = FALSE][1, , drop = FALSE])
+      cleanup_vars(c("sce", "corrected_counts"), envir = environment())
+      obj
+    })
+    names(corrected) <- names(object_list)
+    return(corrected)
+  }
   # 如果原始矩阵和 filtered 矩阵都存在，优先在这里补充 SoupX 逻辑。
-  # 如果只有 filtered 矩阵，可以在这里补充 DecontX 逻辑。
-  obj
+  object_list
 }
 
 qc_filter_one <- function(obj) {
@@ -308,11 +351,9 @@ read_one_sample <- function(sample_id, path) {
   obj <- CreateSeuratObject(
     counts = counts,
     project = project_id,
-    min.cells = min_cells_per_gene,
-    meta.data = one_meta
+    min.cells = min_cells_per_gene
   )
-  obj$sample_id <- sample_id
-  obj$sample <- sample_id
+  obj <- add_sample_metadata(obj, one_meta)
   obj <- RenameCells(obj, add.cell.id = sample_id)
   obj
 }
@@ -328,7 +369,7 @@ read_one_sample <- function(sample_id, path) {
 
 ```{r contamination-correction}
 # object_list <- qread_or_stop(state_paths$object_list_raw, "object_list_raw")
-# object_list <- lapply(object_list, run_contamination_correction)
+# object_list <- run_contamination_correction(object_list)
 # qsave(object_list, state_paths$object_list_contam)
 # cleanup_vars(c("object_list"))
 ```

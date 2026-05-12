@@ -175,9 +175,13 @@ Use an explicit helper similar to:
 ```r
 axel_proxy <- "http://www.cirno999.cn:12306"
 axel_connections <- 10
+check_existing_downloads <- TRUE
 
-download_with_axel <- function(url, dest_path) {
+download_with_axel <- function(url, dest_path, check_existing = check_existing_downloads) {
   dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
+  if (isTRUE(check_existing) && file.exists(dest_path)) {
+    return(dest_path)
+  }
   status <- system2(
     "axel",
     args = c("-n", as.character(axel_connections), "-o", dest_path, url),
@@ -193,6 +197,8 @@ download_with_axel <- function(url, dest_path) {
   dest_path
 }
 ```
+
+Expose `check_existing_downloads <- TRUE` in the parameter block. When it is `TRUE`, the generated code should skip re-downloading a public file if the target path already exists. When it is `FALSE`, allow the script to download again and overwrite the target file.
 
 Common cases:
 
@@ -235,6 +241,29 @@ Include this step before QC filtering.
 - If only filtered count matrices are available, include DecontX as optional fallback if `celda` and `SingleCellExperiment` are installed.
 - If neither method is available or appropriate, do not fail silently. Set `contamination_method <- "none"` or print a clear message. The pipeline must still run.
 - Save both pre- and post-contamination-correction objects or count matrices with qs when feasible.
+- For the DecontX branch, follow this structure and do not use `as.SingleCellExperiment()` there:
+
+```r
+corrected <- lapply(names(object_list), function(n) {
+  obj <- object_list[[n]]
+  sce <- SingleCellExperiment::SingleCellExperiment(
+    assays = list(counts = GetAssayData(obj, assay = "RNA", layer = "counts"))
+  )
+  sce <- celda::decontX(sce)
+  corrected_counts <- celda::decontXcounts(sce)
+  obj[["RNA"]] <- if ("CreateAssay5Object" %in% getNamespaceExports("SeuratObject")) {
+    SeuratObject::CreateAssay5Object(counts = corrected_counts)
+  } else {
+    CreateAssayObject(counts = corrected_counts)
+  }
+  obj <- add_sample_metadata(obj, sample_meta[sample_meta$sample_id == n, , drop = FALSE][1, ])
+  cleanup_vars(c("sce", "corrected_counts"))
+  obj
+})
+```
+
+- Keep the DecontX implementation at the `object_list` level, because metadata restoration depends on the sample name.
+- Add a small helper such as `add_sample_metadata()` so each corrected object gets the expected sample metadata back after the RNA assay is replaced.
 
 Use comments to tell the user that contamination correction can alter low-expression markers and should be checked against canonical marker genes.
 
