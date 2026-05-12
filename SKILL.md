@@ -1,6 +1,6 @@
 ---
 name: geo-scrna-seuratv5-codegen
-description: Generate a high-readability Seurat v5 R or R Markdown (Rmd) pipeline from a scRNA-seq GEO accession, GEO URL, or SRA Selector URL, including GEO/SRA/PubMed metadata extraction, named meta fields, RNA contamination correction, QC, DoubletFinder-based doublet removal, modular qread/qsave state handoff, and selectable RPCA/Harmony/BBKNN integration outputs saved with qs.
+description: Generate a high-readability Seurat v5 R or R Markdown (Rmd) pipeline from a scRNA-seq GEO accession, GEO URL, or SRA Selector URL, including GEO/SRA/PubMed metadata extraction, named meta fields, RNA contamination correction, QC, DoubletFinder-based doublet removal, modular qread/qsave state handoff, selectable RPCA/Harmony/BBKNN integration outputs saved with qs, and an optional SingleR-based initial annotation module for res0.1 clustering results.
 ---
 
 # GEO scRNA-seq to Seurat v5 code generator
@@ -37,6 +37,7 @@ Produce a complete, directly runnable Seurat v5 pipeline tailored to the dataset
    - `integrated_rpca`
    - `integrated_harmony`
    - `integrated_bbknn`
+   - `singleR_initial_annotation`
 5. Make the downstream integration modules independent, so the user can run any one or multiple modules without them affecting each other.
 6. Include a readable parameter block so the user can easily modify `work_dir`, `seed`, QC cutoffs, dimensions, resolution, contamination method, and integration settings.
 7. Include a named R vector called `meta`, and when multiple samples exist also include `sample_meta` as a data frame.
@@ -81,6 +82,7 @@ Both `.R` and `.Rmd` outputs must define a `state_paths` structure similar to:
 
 ```r
 state_dir <- file.path(output_dir, "states")
+annotation_dir <- file.path(output_dir, "annotations")
 state_paths <- list(
   object_list_raw = file.path(state_dir, paste0(project_id, "_01_object_list_raw.qs")),
   object_list_contam = file.path(state_dir, paste0(project_id, "_02_object_list_contam.qs")),
@@ -91,7 +93,8 @@ state_paths <- list(
   integrated_rpca = file.path(state_dir, paste0(project_id, "_07_integrated_rpca.qs")),
   integrated_harmony = file.path(state_dir, paste0(project_id, "_08_integrated_harmony.qs")),
   integrated_bbknn = file.path(state_dir, paste0(project_id, "_09_integrated_bbknn.qs")),
-  seurat_results = file.path(state_dir, paste0(project_id, "_10_seurat_results.qs"))
+  seurat_results = file.path(state_dir, paste0(project_id, "_10_seurat_results.qs")),
+  annotation_dir = annotation_dir
 )
 ```
 
@@ -218,10 +221,11 @@ Generate the pipeline in this order:
 10. RPCA module.
 11. Harmony module.
 12. BBKNN module.
-13. Optional Python placeholder chunk for `.Rmd`.
-14. Final results assembly module.
-15. Diagnostic plot module.
-16. Final validation module.
+13. SingleR initial annotation module.
+14. Optional Python placeholder chunk for `.Rmd`.
+15. Final results assembly module.
+16. Diagnostic plot module.
+17. Final validation module.
 
 ## RNA contamination correction rules
 
@@ -248,10 +252,12 @@ n_hvg <- 3000
 dims_use <- NULL
 npcs <- 40
 vars_to_regress <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
-cluster_resolution <- 0.5
+cluster_resolutions <- c(0.1, 0.5)
 ```
 
 For human datasets, mitochondrial genes generally match `^MT-`; for mouse, generally `^mt-`. Infer species if possible; otherwise expose `mt_pattern` in the parameter block.
+
+Keep `0.1` inside `cluster_resolutions`, because the SingleR initial annotation module depends on `res0.1` cluster labels.
 
 ## Standard preprocessing defaults
 
@@ -305,6 +311,67 @@ When the dataset has sample-level structure, generated code should remove double
 - If only one sample exists, still run the same DoubletFinder logic on that single sample object.
 - Use Chinese comments to explain why doublet removal is done per sample before the final merged analysis.
 
+## SingleR rules
+
+Add an independent SingleR initial annotation module for `res0.1` clustering results.
+
+- Let the user choose the upstream result via a simple setting such as `singleR_annotation_input_key`.
+- Add a nearby Chinese comment that explicitly lists the allowed values:
+  - `merged_no_correction`
+  - `integrated_rpca`
+  - `integrated_harmony`
+  - `integrated_bbknn`
+- Save SingleR outputs into `output_dir/annotations`.
+- Save both:
+  1. a cluster-level annotation table, and
+  2. an annotated Seurat object with per-cell propagated labels.
+- Use `SingleR` cluster-level annotation on the `res0.1` clustering column rather than annotating every cell independently.
+- For `merged_no_correction`, `integrated_rpca`, and `integrated_harmony`, use `RNA_snn_res.0.1` as the cluster column.
+- For `integrated_bbknn`, use `bbknn_res.0.1` as the cluster column.
+- If the chosen upstream object does not contain the required `res0.1` cluster column, stop with a clear error message instead of guessing.
+- Use stable output naming derived from `project_id` and `singleR_annotation_input_key`, so different projects keep the same output structure.
+
+Use a template similar to:
+
+```r
+# 中文注释：可选上游结果有 merged_no_correction / integrated_rpca / integrated_harmony / integrated_bbknn
+singleR_annotation_input_key <- "integrated_harmony"
+singleR_label_field <- "label.main"
+singleR_reference <- NULL
+
+get_singleR_cluster_column <- function(input_key) {
+  switch(
+    input_key,
+    merged_no_correction = "RNA_snn_res.0.1",
+    integrated_rpca = "RNA_snn_res.0.1",
+    integrated_harmony = "RNA_snn_res.0.1",
+    integrated_bbknn = "bbknn_res.0.1",
+    stop(sprintf("Unsupported SingleR input key: %s", input_key), call. = FALSE)
+  )
+}
+
+build_singleR_output_paths <- function(input_key) {
+  list(
+    table_csv = file.path(annotation_dir, paste0(project_id, "_", input_key, "_SingleR_res0.1.csv")),
+    annotated_qs = file.path(annotation_dir, paste0(project_id, "_", input_key, "_SingleR_annotated.qs"))
+  )
+}
+
+require_or_stop("SingleR")
+obj_singleR <- qread(state_paths[[singleR_annotation_input_key]])
+cluster_col <- get_singleR_cluster_column(singleR_annotation_input_key)
+sce_singleR <- as.SingleCellExperiment(obj_singleR, assay = "RNA")
+pred_singleR <- SingleR::SingleR(
+  test = sce_singleR,
+  ref = singleR_reference,
+  labels = SummarizedExperiment::colData(singleR_reference)[[singleR_label_field]],
+  clusters = obj_singleR[[cluster_col]][, 1],
+  assay.type.test = 1
+)
+```
+
+Then propagate the cluster-level labels back to each cell and save both the annotation table and the annotated object.
+
 ## BBKNN rules
 
 Add an independent BBKNN integration module.
@@ -332,11 +399,11 @@ obj_bbknn <- bbknnR::RunBBKNN(
   graph_name = "bbknn",
   run_TSNE = FALSE,
   run_UMAP = TRUE,
-  UMAP_name = "umap.bbknn",
+  UMAP_name = "umap",
   seed = seed,
   verbose = FALSE
 )
-obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolution)
+obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolutions)
 qsave(obj_bbknn, state_paths$integrated_bbknn)
 ```
 
@@ -377,6 +444,20 @@ Generated code should actively control memory usage instead of waiting until the
 - After state has been handed off with `qsave()`, clean up the in-memory copy when safe.
 - After creating the final `seurat_results` object and saving it, clear redundant standalone bindings that are already captured inside `seurat_results` when that does not break the remaining validation code.
 - Use concise Chinese comments to explain why a cleanup step is safe.
+
+## Output format stability requirements
+
+The generated pipeline must keep a stable top-level format across different projects.
+
+- Preserve the same module order unless a module is explicitly unavailable.
+- Preserve the same section titles or chunk titles across projects.
+- Preserve the same parameter names, helper function names, and `state_paths` keys across projects.
+- Preserve the same output directory layout: `output/`, `output/figures/`, `output/states/`, and `output/annotations/`.
+- Preserve the same object names for core states: `object_list_raw`, `object_list_contam`, `obj_qc`, `obj_singlet_merged_raw`, `obj_singlet_merged`, `merged_no_correction`, `integrated_rpca`, `integrated_harmony`, `integrated_bbknn`, `seurat_results`.
+- Preserve the same annotation-setting names: `singleR_annotation_input_key`, `singleR_label_field`, `singleR_reference`.
+- Preserve the same shared UMAP reduction name, `umap`, across all downstream result objects so later plotting modules can run unchanged.
+- Keep `DoubletFinder` and merged-singlet re-preprocessing as two separate modules; do not merge them back into one ad hoc block.
+- Do not rename modules, reorder them, or switch between ad hoc naming schemes from one project to another.
 
 ## Readability requirements
 

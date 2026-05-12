@@ -1,6 +1,6 @@
 # geo-scrna-seuratv5-codegen
 
-Codex skill for generating readable Seurat v5 `R` or `Rmd` pipelines from GEO/SRA scRNA-seq datasets.
+Codex skill for generating stable-format Seurat v5 `R` or `Rmd` pipelines from GEO/SRA scRNA-seq datasets, with modular `qread()` / `qsave()` handoff, selectable RPCA/Harmony/BBKNN integration, and optional SingleR initial annotation on `res0.1`.
 
 ## Install
 

@@ -39,7 +39,7 @@ library(data.table)
 library(dplyr)
 library(ggplot2)
 
-# 中文注释：这里必须写入用户明确提供的工作目录和随机种子
+# 运行前请先把工作目录替换为当前项目目录。
 work_dir <- "<WORK_DIR>"
 seed <- <SEED>
 setwd(work_dir)
@@ -49,9 +49,11 @@ input_dir <- file.path(work_dir, "data", "<GSEID>")
 output_dir <- file.path(work_dir, "output", "<GSEID>")
 fig_dir <- file.path(output_dir, "figures")
 state_dir <- file.path(output_dir, "states")
+annotation_dir <- file.path(output_dir, "annotations")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(state_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(annotation_dir, recursive = TRUE, showWarnings = FALSE)
 
 min_features <- 200
 max_features <- 6000
@@ -62,7 +64,7 @@ n_hvg <- 3000
 dims_use <- NULL
 npcs <- 40
 vars_to_regress <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
-cluster_resolution <- 0.5
+cluster_resolutions <- c(0.1, 0.5)
 mt_pattern <- "^MT-"
 contamination_method <- "auto" # auto, soupx, decontx, none
 run_doubletfinder <- TRUE
@@ -71,6 +73,15 @@ doubletfinder_npcs <- 30
 doubletfinder_resolution <- 0.1
 axel_proxy <- "http://www.cirno999.cn:12306"
 axel_connections <- 10
+
+# SingleR 上游结果可选，复制其中一个即可：
+# "merged_no_correction"
+# "integrated_rpca"
+# "integrated_harmony"
+# "integrated_bbknn"
+singleR_annotation_input_key <- "integrated_harmony"
+singleR_label_field <- "label.main"
+singleR_reference <- NULL
 
 state_paths <- list(
   object_list_raw = file.path(state_dir, paste0(project_id, "_01_object_list_raw.qs")),
@@ -83,7 +94,8 @@ state_paths <- list(
   integrated_harmony = file.path(state_dir, paste0(project_id, "_08_integrated_harmony.qs")),
   integrated_bbknn = file.path(state_dir, paste0(project_id, "_09_integrated_bbknn.qs")),
   seurat_results = file.path(state_dir, paste0(project_id, "_10_seurat_results.qs")),
-  session_info = file.path(state_dir, paste0(project_id, "_11_session_info.txt"))
+  session_info = file.path(state_dir, paste0(project_id, "_11_session_info.txt")),
+  annotation_dir = annotation_dir
 )
 
 multiplet_rates_10x <- data.frame(
@@ -100,7 +112,14 @@ cleanup_vars <- function(var_names, envir = .GlobalEnv) {
   invisible(gc())
 }
 
-# 中文注释：公共数据下载统一使用 axel，不使用 R 内置下载函数
+qread_or_stop <- function(path, label = basename(path)) {
+  if (!file.exists(path)) {
+    stop(sprintf("Required upstream file '%s' was not found: %s", label, path), call. = FALSE)
+  }
+  qread(path)
+}
+
+# 下载公开数据时统一通过 axel 走 10 线程和固定代理。
 download_with_axel <- function(url, dest_path) {
   dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
   status <- system2(
@@ -118,7 +137,7 @@ download_with_axel <- function(url, dest_path) {
   dest_path
 }
 
-# 中文注释：当用户没有显式给出 dims_use 时，按拐点和累计贡献率自动确定主成分数
+# 当 dims_use 未手动设置时，自动根据拐点法估计一个最小可用 PC 数。
 calculate_min_pc <- function(obj, reduction = "harmony") {
   stdv <- obj[[reduction]]@stdev
   percent_stdv <- (stdv / sum(stdv)) * 100
@@ -143,10 +162,15 @@ resolve_dims_use <- function(obj, reduction = "harmony") {
   seq_len(calculate_min_pc(obj, reduction = reduction))
 }
 
-# 中文注释：标准预处理流程固定采用技能约定的参数
+# 标准预处理参数固定在这里，保证不同项目的脚本风格稳定。
 preprocess_standard <- function(obj, npcs_use = npcs) {
-  obj <- NormalizeData(obj, normalization.method = "LogNormalize",
-                       scale.factor = 10000, margin = 1, assay = "RNA")
+  obj <- NormalizeData(
+    obj,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000,
+    margin = 1,
+    assay = "RNA"
+  )
   obj <- FindVariableFeatures(obj, nfeatures = n_hvg)
   obj <- ScaleData(obj, vars.to.regress = vars_to_regress)
   obj <- RunPCA(obj, features = VariableFeatures(obj), npcs = npcs_use)
@@ -161,15 +185,38 @@ estimate_multiplet_rate <- function(cell_number) {
   multiplet_rates_10x$Multiplet_rate[max(idx)]
 }
 
+get_singleR_cluster_column <- function(input_key) {
+  switch(
+    input_key,
+    merged_no_correction = "RNA_snn_res.0.1",
+    integrated_rpca = "RNA_snn_res.0.1",
+    integrated_harmony = "RNA_snn_res.0.1",
+    integrated_bbknn = "bbknn_res.0.1",
+    stop(sprintf("Unsupported singleR_annotation_input_key: %s", input_key), call. = FALSE)
+  )
+}
+
+build_singleR_output_paths <- function(input_key) {
+  list(
+    table_csv = file.path(annotation_dir, paste0(project_id, "_", input_key, "_SingleR_res0.1.csv")),
+    annotated_qs = file.path(annotation_dir, paste0(project_id, "_", input_key, "_SingleR_annotated.qs"))
+  )
+}
+
 run_doubletfinder_one_sample <- function(o) {
-  o <- NormalizeData(o, normalization.method = "LogNormalize",
-                     scale.factor = 10000, margin = 1, assay = "RNA")
+  o <- NormalizeData(
+    o,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000,
+    margin = 1,
+    assay = "RNA"
+  )
   o <- FindVariableFeatures(o, nfeatures = n_hvg)
   o <- ScaleData(o, vars.to.regress = vars_to_regress)
   o <- RunPCA(o, features = VariableFeatures(o), npcs = doubletfinder_npcs)
 
   min_pc <- calculate_min_pc(o, reduction = "pca")
-  o <- RunUMAP(o, reduction = "pca", dims = 1:min_pc)
+  o <- RunUMAP(o, reduction = "pca", dims = 1:min_pc, reduction.name = "umap")
   o <- FindNeighbors(o, reduction = "pca", dims = 1:min_pc)
   o <- FindClusters(o, resolution = doubletfinder_resolution)
 
@@ -194,16 +241,12 @@ run_doubletfinder_one_sample <- function(o) {
 }
 
 remove_doublets_by_sample <- function(obj) {
-  # 中文注释：双细胞按样本分别检测，可以减少不同样本混合带来的参数偏移
   sample_obj <- SplitObject(obj, split.by = "sample")
-
-  h <- lapply(names(sample_obj), function(n) {
-    run_doubletfinder_one_sample(sample_obj[[n]])
-  })
+  h <- lapply(names(sample_obj), function(nm) run_doubletfinder_one_sample(sample_obj[[nm]]))
   names(h) <- names(sample_obj)
 
-  h.singlet <- lapply(names(sample_obj), function(n) {
-    o <- h[[n]]
+  h.singlet <- lapply(names(sample_obj), function(nm) {
+    o <- h[[nm]]
     colnames(o@meta.data)[grepl("DF.classifications", colnames(o@meta.data))] <- "doublet_finder"
     subset(o, subset = doublet_finder == "Singlet")
   })
@@ -215,14 +258,13 @@ remove_doublets_by_sample <- function(obj) {
     singlet_merged <- merge(h.singlet[[1]], y = h.singlet[-1], add.cell.ids = names(h.singlet))
   }
   singlet_merged <- JoinLayers(singlet_merged)
-
-  # 中文注释：单细胞结果已经合并完成，可释放 DoubletFinder 中间对象
   cleanup_vars(c("h", "h.singlet", "sample_obj"), envir = environment())
   singlet_merged
 }
 
 run_contamination_correction <- function(obj) {
-  # 中文注释：优先使用 SoupX；若只有 filtered matrix，可选 DecontX；都不可用时明确跳过
+  # 如果原始矩阵和 filtered 矩阵都存在，优先在这里补充 SoupX 逻辑。
+  # 如果只有 filtered 矩阵，可以在这里补充 DecontX 逻辑。
   obj
 }
 
@@ -257,7 +299,7 @@ collect_seurat_results <- function() {
 }
 
 # ---- 02. raw input processing module ----
-# 中文注释：这里必须替换为与 GEO 文件格式匹配的读取逻辑；如果需要下载公开补充文件，请调用 download_with_axel()
+# 只在这一段从原始文件开始处理；后续模块都依赖 qread/qsave 串联状态。
 read_one_sample <- function(sample_id, path) {
   counts <- Read10X(data.dir = path)
   one_meta <- sample_meta[match(sample_id, sample_meta$sample_id), , drop = FALSE]
@@ -279,14 +321,14 @@ read_one_sample <- function(sample_id, path) {
 # qsave(object_list, state_paths$object_list_raw)
 # cleanup_vars(c("object_list", "sample_paths"))
 
-# ---- 03. contamination correction module ----
-# object_list <- qread(state_paths$object_list_raw)
+# ---- 03. RNA contamination correction module ----
+# object_list <- qread_or_stop(state_paths$object_list_raw, "object_list_raw")
 # object_list <- lapply(object_list, run_contamination_correction)
 # qsave(object_list, state_paths$object_list_contam)
 # cleanup_vars(c("object_list"))
 
 # ---- 04. QC module ----
-# object_list <- qread(state_paths$object_list_contam)
+# object_list <- qread_or_stop(state_paths$object_list_contam, "object_list_contam")
 # qc_list <- lapply(object_list, qc_filter_one)
 # obj_qc <- if (length(qc_list) == 1) qc_list[[1]] else merge(qc_list[[1]], y = qc_list[-1], add.cell.ids = names(qc_list))
 # obj_qc <- JoinLayers(obj_qc)
@@ -294,26 +336,30 @@ read_one_sample <- function(sample_id, path) {
 # cleanup_vars(c("object_list", "qc_list", "obj_qc"))
 
 # ---- 05. DoubletFinder module ----
-# obj_qc <- qread(state_paths$obj_qc)
+# obj_qc <- qread_or_stop(state_paths$obj_qc, "obj_qc")
 # obj_singlet_merged_raw <- if (run_doubletfinder) remove_doublets_by_sample(obj_qc) else obj_qc
 # qsave(obj_singlet_merged_raw, state_paths$obj_singlet_merged_raw)
+# cleanup_vars(c("obj_qc", "obj_singlet_merged_raw"))
+
+# ---- 06. re-preprocessing module for merged singlets ----
+# 对去双后的合并对象重新跑一次标准流程，后续各整合模块都从这里继续分叉。
+# obj_singlet_merged_raw <- qread_or_stop(state_paths$obj_singlet_merged_raw, "obj_singlet_merged_raw")
 # obj_singlet_merged <- preprocess_standard(obj_singlet_merged_raw)
 # qsave(obj_singlet_merged, state_paths$obj_singlet_merged)
-# cleanup_vars(c("obj_qc", "obj_singlet_merged_raw", "obj_singlet_merged"))
+# cleanup_vars(c("obj_singlet_merged_raw", "obj_singlet_merged"))
 
-# ---- 06. merge-only baseline module ----
-# 中文注释：该模块只依赖去双后的标准预处理对象，可单独运行
-# obj_merged_no_correction <- qread(state_paths$obj_singlet_merged)
+# ---- 07. merge-only baseline module ----
+# 这一支只用合并后的对象直接聚类，不做额外整合。
+# obj_merged_no_correction <- qread_or_stop(state_paths$obj_singlet_merged, "obj_singlet_merged")
 # dims_pca <- resolve_dims_use(obj_merged_no_correction, reduction = "pca")
-# obj_merged_no_correction <- RunUMAP(obj_merged_no_correction, reduction = "pca", dims = dims_pca, reduction.name = "umap.unintegrated")
+# obj_merged_no_correction <- RunUMAP(obj_merged_no_correction, reduction = "pca", dims = dims_pca, reduction.name = "umap")
 # obj_merged_no_correction <- FindNeighbors(obj_merged_no_correction, reduction = "pca", dims = dims_pca)
-# obj_merged_no_correction <- FindClusters(obj_merged_no_correction, resolution = cluster_resolution)
+# obj_merged_no_correction <- FindClusters(obj_merged_no_correction, resolution = cluster_resolutions)
 # qsave(obj_merged_no_correction, state_paths$merged_no_correction)
 # cleanup_vars(c("obj_merged_no_correction", "dims_pca"))
 
-# ---- 07. RPCA integration module ----
-# 中文注释：RPCA 模块从去双后的原始合并对象重新开始，不依赖其他整合模块
-# obj_rpca <- qread(state_paths$obj_singlet_merged_raw)
+# ---- 08. RPCA module ----
+# obj_rpca <- qread_or_stop(state_paths$obj_singlet_merged_raw, "obj_singlet_merged_raw")
 # obj_rpca[["RNA"]] <- split(obj_rpca[["RNA"]], f = obj_rpca$sample_id)
 # obj_rpca$sample <- obj_rpca$sample_id
 # obj_rpca <- preprocess_standard(obj_rpca)
@@ -325,32 +371,30 @@ read_one_sample <- function(sample_id, path) {
 #   verbose = FALSE
 # )
 # obj_rpca <- JoinLayers(obj_rpca)
-# dims_rpca <- if (is.null(dims_use)) seq_len(calculate_min_pc(obj_rpca, reduction = "integrated.rpca")) else dims_use
+# dims_rpca <- resolve_dims_use(obj_rpca, reduction = "integrated.rpca")
 # obj_rpca <- FindNeighbors(obj_rpca, reduction = "integrated.rpca", dims = dims_rpca)
-# obj_rpca <- RunUMAP(obj_rpca, reduction = "integrated.rpca", dims = dims_rpca, reduction.name = "umap.rpca")
-# obj_rpca <- FindClusters(obj_rpca, resolution = cluster_resolution)
+# obj_rpca <- RunUMAP(obj_rpca, reduction = "integrated.rpca", dims = dims_rpca, reduction.name = "umap")
+# obj_rpca <- FindClusters(obj_rpca, resolution = cluster_resolutions)
 # qsave(obj_rpca, state_paths$integrated_rpca)
 # cleanup_vars(c("obj_rpca", "dims_rpca"))
 
-# ---- 08. Harmony integration module ----
-# 中文注释：Harmony 模块同样独立运行，不依赖 RPCA 或 BBKNN 输出
+# ---- 09. Harmony module ----
 # require_or_stop("harmony")
-# obj_harmony <- qread(state_paths$obj_singlet_merged_raw)
+# obj_harmony <- qread_or_stop(state_paths$obj_singlet_merged_raw, "obj_singlet_merged_raw")
 # obj_harmony$sample <- obj_harmony$sample_id
 # obj_harmony <- preprocess_standard(obj_harmony)
 # RunHarmony <- harmony::RunHarmony
 # obj_harmony <- RunHarmony(obj_harmony, "sample")
-# dims_harmony <- if (is.null(dims_use)) seq_len(calculate_min_pc(obj_harmony, reduction = "harmony")) else dims_use
+# dims_harmony <- resolve_dims_use(obj_harmony, reduction = "harmony")
 # obj_harmony <- FindNeighbors(obj_harmony, reduction = "harmony", dims = dims_harmony)
-# obj_harmony <- RunUMAP(obj_harmony, reduction = "harmony", dims = dims_harmony, reduction.name = "umap.harmony")
-# obj_harmony <- FindClusters(obj_harmony, resolution = cluster_resolution)
+# obj_harmony <- RunUMAP(obj_harmony, reduction = "harmony", dims = dims_harmony, reduction.name = "umap")
+# obj_harmony <- FindClusters(obj_harmony, resolution = cluster_resolutions)
 # qsave(obj_harmony, state_paths$integrated_harmony)
 # cleanup_vars(c("obj_harmony", "dims_harmony"))
 
-# ---- 09. BBKNN integration module ----
-# 中文注释：BBKNN 模块单独读取上游状态，因此可与 RPCA / Harmony 任意组合运行
+# ---- 10. BBKNN module ----
 # require_or_stop("bbknnR")
-# obj_bbknn <- qread(state_paths$obj_singlet_merged_raw)
+# obj_bbknn <- qread_or_stop(state_paths$obj_singlet_merged_raw, "obj_singlet_merged_raw")
 # obj_bbknn$sample <- obj_bbknn$sample_id
 # obj_bbknn <- preprocess_standard(obj_bbknn)
 # dims_bbknn <- if (is.null(dims_use)) calculate_min_pc(obj_bbknn, reduction = "pca") else max(dims_use)
@@ -362,30 +406,57 @@ read_one_sample <- function(sample_id, path) {
 #   graph_name = "bbknn",
 #   run_TSNE = FALSE,
 #   run_UMAP = TRUE,
-#   UMAP_name = "umap.bbknn",
+#   UMAP_name = "umap",
 #   seed = seed,
 #   verbose = FALSE
 # )
-# obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolution)
+# obj_bbknn <- FindClusters(obj_bbknn, graph.name = "bbknn", resolution = cluster_resolutions)
 # qsave(obj_bbknn, state_paths$integrated_bbknn)
 # cleanup_vars(c("obj_bbknn", "dims_bbknn"))
 
-# ---- 10. diagnostic plots module ----
-# result_files <- c(
-#   merged_no_correction = state_paths$merged_no_correction,
-#   integrated_rpca = state_paths$integrated_rpca,
-#   integrated_harmony = state_paths$integrated_harmony,
-#   integrated_bbknn = state_paths$integrated_bbknn
-# )
-# for (nm in names(result_files)) {
-#   if (!file.exists(result_files[[nm]])) next
-#   obj_plot <- qread(result_files[[nm]])
-#   p <- DimPlot(obj_plot, reduction = "umap", group.by = "sample", pt.size = 0.3)
-#   ggsave(file.path(fig_dir, paste0(project_id, "_", nm, "_sample_umap.png")), plot = p, width = 8, height = 6)
-#   cleanup_vars(c("obj_plot", "p"))
+# ---- 11. SingleR initial annotation module ----
+# 这里默认针对 res0.1 的聚类结果做初步自动注释，并把结果保存到 annotations 目录。
+# require_or_stop("SingleR")
+# require_or_stop("SingleCellExperiment")
+# if (is.null(singleR_reference)) {
+#   stop("Set singleR_reference to a valid reference object before running the SingleR module.", call. = FALSE)
 # }
+# if (!singleR_label_field %in% colnames(SummarizedExperiment::colData(singleR_reference))) {
+#   stop(sprintf("singleR_label_field '%s' was not found in singleR_reference.", singleR_label_field), call. = FALSE)
+# }
+# singleR_input_path <- state_paths[[singleR_annotation_input_key]]
+# if (is.null(singleR_input_path)) {
+#   stop(sprintf("Unknown singleR_annotation_input_key: %s", singleR_annotation_input_key), call. = FALSE)
+# }
+# obj_singleR <- qread_or_stop(singleR_input_path, singleR_annotation_input_key)
+# cluster_col <- get_singleR_cluster_column(singleR_annotation_input_key)
+# if (!cluster_col %in% colnames(obj_singleR@meta.data)) {
+#   stop(sprintf("Cluster column '%s' was not found in the selected object.", cluster_col), call. = FALSE)
+# }
+# cluster_ids <- as.character(obj_singleR[[cluster_col]][, 1])
+# sce_singleR <- as.SingleCellExperiment(obj_singleR, assay = "RNA")
+# pred_singleR <- SingleR::SingleR(
+#   test = sce_singleR,
+#   ref = singleR_reference,
+#   labels = SummarizedExperiment::colData(singleR_reference)[[singleR_label_field]],
+#   clusters = cluster_ids
+# )
+# pred_singleR_df <- as.data.frame(pred_singleR)
+# pred_singleR_df$cluster_id <- rownames(pred_singleR_df)
+# pred_singleR_df <- pred_singleR_df[, c("cluster_id", setdiff(colnames(pred_singleR_df), "cluster_id")), drop = FALSE]
+# singleR_labels <- pred_singleR_df$pruned.labels
+# if (all(is.na(singleR_labels))) {
+#   singleR_labels <- pred_singleR_df$labels
+# }
+# names(singleR_labels) <- pred_singleR_df$cluster_id
+# obj_singleR$singleR_res0.1_cluster <- cluster_ids
+# obj_singleR$singleR_res0.1_label <- unname(singleR_labels[cluster_ids])
+# singleR_outputs <- build_singleR_output_paths(singleR_annotation_input_key)
+# data.table::fwrite(pred_singleR_df, file = singleR_outputs$table_csv)
+# qsave(obj_singleR, singleR_outputs$annotated_qs)
+# cleanup_vars(c("obj_singleR", "sce_singleR", "pred_singleR", "pred_singleR_df", "singleR_labels", "cluster_ids", "cluster_col", "singleR_outputs", "singleR_input_path"))
 
-# ---- 11. final results assembly module ----
+# ---- 12. final results assembly module ----
 # seurat_results <- collect_seurat_results()
 # if (length(seurat_results) == 0) {
 #   stop("No downstream result files were found. Run at least one baseline/integration module first.", call. = FALSE)
@@ -393,11 +464,22 @@ read_one_sample <- function(sample_id, path) {
 # qsave(seurat_results, state_paths$seurat_results)
 # cleanup_vars(c("seurat_results"))
 
-# ---- 12. final validation module ----
-# seurat_results <- qread(state_paths$seurat_results)
+# ---- 13. diagnostic plot module ----
+# seurat_results <- qread_or_stop(state_paths$seurat_results, "seurat_results")
+# for (nm in names(seurat_results)) {
+#   obj_plot <- seurat_results[[nm]]
+#   p <- DimPlot(obj_plot, reduction = "umap", group.by = "sample", pt.size = 0.3)
+#   ggsave(file.path(fig_dir, paste0(project_id, "_", nm, "_sample_umap.png")), plot = p, width = 8, height = 6)
+#   cleanup_vars(c("obj_plot", "p"))
+# }
+# cleanup_vars(c("seurat_results"))
+
+# ---- 14. final validation module ----
+# seurat_results <- qread_or_stop(state_paths$seurat_results, "seurat_results")
 # print(seurat_results)
 # stopifnot(length(seurat_results) >= 1)
 # stopifnot(all(vapply(seurat_results, inherits, logical(1), what = "Seurat")))
+# stopifnot(all(vapply(seurat_results, function(x) "umap" %in% names(x@reductions), logical(1))))
 # stopifnot(file.exists(state_paths$seurat_results))
 # writeLines(capture.output(sessionInfo()), con = state_paths$session_info)
 # cleanup_vars(c("seurat_results"))

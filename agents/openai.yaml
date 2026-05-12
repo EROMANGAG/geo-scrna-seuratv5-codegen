@@ -1,6 +1,6 @@
 interface:
   display_name: "GEO scRNA-seq Seurat v5 codegen"
-  short_description: "Generate Seurat v5 R or Rmd pipelines from GEO/SRA scRNA-seq datasets."
-  default_prompt: "Use this skill to generate a Seurat v5 R or Rmd processing pipeline from the provided GEO/SRA scRNA-seq dataset."
+  short_description: "Generate stable-format Seurat v5 R or Rmd pipelines from GEO/SRA scRNA-seq datasets."
+  default_prompt: "Use this skill to generate a stable-format Seurat v5 R or Rmd processing pipeline from the provided GEO/SRA scRNA-seq dataset, including optional SingleR initial annotation when appropriate."
 policy:
   allow_implicit_invocation: true
