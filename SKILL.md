@@ -83,12 +83,14 @@ Both `.R` and `.Rmd` outputs must define a `state_paths` structure similar to:
 ```r
 state_dir <- file.path(output_dir, "states")
 annotation_dir <- file.path(output_dir, "annotations")
+metrics_dir <- file.path(output_dir, "metrics")
 state_paths <- list(
   object_list_raw = file.path(state_dir, paste0(project_id, "_01_object_list_raw.qs")),
   object_list_contam = file.path(state_dir, paste0(project_id, "_02_object_list_contam.qs")),
   obj_qc = file.path(state_dir, paste0(project_id, "_03_obj_qc.qs")),
   obj_singlet_merged_raw = file.path(state_dir, paste0(project_id, "_04_obj_singlet_merged_raw.qs")),
   obj_singlet_merged = file.path(state_dir, paste0(project_id, "_05_obj_singlet_merged.qs")),
+  doubletfinder_cell_counts_csv = file.path(metrics_dir, paste0(project_id, "_doubletfinder_cell_counts.csv")),
   merged_no_correction = file.path(state_dir, paste0(project_id, "_06_merged_no_correction.qs")),
   integrated_rpca = file.path(state_dir, paste0(project_id, "_07_integrated_rpca.qs")),
   integrated_harmony = file.path(state_dir, paste0(project_id, "_08_integrated_harmony.qs")),
@@ -265,14 +267,33 @@ Use comments to tell the user that contamination correction can alter low-expres
 
 ## Seurat v5 compatibility rules
 
-Generated code must target `Seurat > 5.0.0` and `SeuratObject > 5.0.0`.
+Generated code must target the validated package baseline below, derived from the user's reference `sessionInfo()`.
 
-- Add an explicit version check near the package block and stop early if either package is `<= 5.0.0`.
+```r
+package_version_requirements <- c(
+  Seurat = "5.5.0",
+  SeuratObject = "5.4.0",
+  qs = "0.27.3",
+  ggplot2 = "4.0.3",
+  dplyr = "1.2.1",
+  data.table = "1.17.8",
+  Matrix = "1.7-5",
+  DoubletFinder = "2.0.6",
+  harmony = "2.0.2",
+  SingleR = "2.8.0",
+  SingleCellExperiment = "1.28.0"
+)
+```
+
+At minimum, generated code should check the versions of the main packages it actually uses and stop early if the installed version is below the validated baseline.
+
+- Add an explicit version-check helper near the package block and use it against the validated baseline.
 - Do not generate `FetchData(..., slot = ...)`; always use `FetchData(..., layer = ..., assay = ...)` when expression data must be fetched.
 - Do not generate `GetAssayData(..., slot = ...)` or `SetAssayData(..., slot = ...)`.
 - Prefer `LayerData()` and `LayerData<-` for expression matrix access in Seurat v5 style code.
 - Do not generate `CreateAssayObject()` fallback branches for legacy Seurat versions; use `SeuratObject::CreateAssay5Object()` directly.
 - If a helper or code block was originally written for Seurat v4 or older, rewrite it to v5-compatible layer semantics before emitting the final script.
+- Keep optional-module checks aligned with the same baseline; for example, `harmony`, `SingleR`, and `SingleCellExperiment` should also be checked before their modules run.
 
 ## QC defaults
 
@@ -346,6 +367,10 @@ When the dataset has sample-level structure, generated code should remove double
 - Rename the detected classification column to a stable name such as `doublet_finder` before subsetting singlets.
 - If only one sample exists, still run the same DoubletFinder logic on that single sample object.
 - Use Chinese comments to explain why doublet removal is done per sample before the final merged analysis.
+- Print the per-sample cell counts before DoubletFinder and after DoubletFinder.
+- Save a stable per-sample summary table that includes `sample`, `cells_before_doubletfinder`, `cells_after_doubletfinder`, and `cells_removed_by_doubletfinder`.
+- Save that summary table to a stable path such as `output/metrics/<project_id>_doubletfinder_cell_counts.csv`.
+- Even if `run_doubletfinder <- FALSE`, still emit the same summary table with identical before/after counts so the output shape stays stable.
 
 ## SingleR rules
 
@@ -488,7 +513,7 @@ The generated pipeline must keep a stable top-level format across different proj
 - Preserve the same module order unless a module is explicitly unavailable.
 - Preserve the same section titles or chunk titles across projects.
 - Preserve the same parameter names, helper function names, and `state_paths` keys across projects.
-- Preserve the same output directory layout: `output/`, `output/figures/`, `output/states/`, and `output/annotations/`.
+- Preserve the same output directory layout: `output/`, `output/figures/`, `output/states/`, `output/annotations/`, and `output/metrics/`.
 - Preserve the same object names for core states: `object_list_raw`, `object_list_contam`, `obj_qc`, `obj_singlet_merged_raw`, `obj_singlet_merged`, `merged_no_correction`, `integrated_rpca`, `integrated_harmony`, `integrated_bbknn`, `seurat_results`.
 - Preserve the same annotation-setting names: `singleR_annotation_input_key`, `singleR_label_field`, `singleR_reference`.
 - Preserve the same shared UMAP reduction name, `umap`, across all downstream result objects so later plotting modules can run unchanged.

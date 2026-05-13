@@ -29,17 +29,32 @@ require_or_stop <- function(pkg) {
   }
 }
 
-require_version_gt <- function(pkg, min_version) {
+package_version_requirements <- c(
+  Seurat = "5.5.0",
+  SeuratObject = "5.4.0",
+  qs = "0.27.3",
+  ggplot2 = "4.0.3",
+  dplyr = "1.2.1",
+  data.table = "1.17.8",
+  Matrix = "1.7-5",
+  DoubletFinder = "2.0.6",
+  harmony = "2.0.2",
+  SingleR = "2.8.0",
+  SingleCellExperiment = "1.28.0"
+)
+
+require_version_gte <- function(pkg, min_version = package_version_requirements[[pkg]]) {
   require_or_stop(pkg)
-  if (utils::compareVersion(as.character(utils::packageVersion(pkg)), min_version) <= 0) {
-    stop(sprintf("Package '%s' must be > %s for this Seurat v5 pipeline.", pkg, min_version), call. = FALSE)
+  if (is.null(min_version) || is.na(min_version)) {
+    stop(sprintf("No validated version baseline was defined for package '%s'.", pkg), call. = FALSE)
+  }
+  if (utils::compareVersion(as.character(utils::packageVersion(pkg)), min_version) < 0) {
+    stop(sprintf("Package '%s' must be >= %s for this validated pipeline.", pkg, min_version), call. = FALSE)
   }
 }
 
 required_packages <- c("Seurat", "SeuratObject", "qs", "Matrix", "data.table", "dplyr", "ggplot2", "DoubletFinder")
-invisible(lapply(required_packages, require_or_stop))
-require_version_gt("Seurat", "5.0.0")
-require_version_gt("SeuratObject", "5.0.0")
+invisible(lapply(required_packages, require_version_gte))
 
 library(Seurat)
 library(qs)
@@ -59,10 +74,12 @@ output_dir <- file.path(work_dir, "output", "<GSEID>")
 fig_dir <- file.path(output_dir, "figures")
 state_dir <- file.path(output_dir, "states")
 annotation_dir <- file.path(output_dir, "annotations")
+metrics_dir <- file.path(output_dir, "metrics")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(state_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(annotation_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(metrics_dir, recursive = TRUE, showWarnings = FALSE)
 
 min_features <- 200
 max_features <- 6000
@@ -99,13 +116,15 @@ state_paths <- list(
   obj_qc = file.path(state_dir, paste0(project_id, "_03_obj_qc.qs")),
   obj_singlet_merged_raw = file.path(state_dir, paste0(project_id, "_04_obj_singlet_merged_raw.qs")),
   obj_singlet_merged = file.path(state_dir, paste0(project_id, "_05_obj_singlet_merged.qs")),
+  doubletfinder_cell_counts_csv = file.path(metrics_dir, paste0(project_id, "_doubletfinder_cell_counts.csv")),
   merged_no_correction = file.path(state_dir, paste0(project_id, "_06_merged_no_correction.qs")),
   integrated_rpca = file.path(state_dir, paste0(project_id, "_07_integrated_rpca.qs")),
   integrated_harmony = file.path(state_dir, paste0(project_id, "_08_integrated_harmony.qs")),
   integrated_bbknn = file.path(state_dir, paste0(project_id, "_09_integrated_bbknn.qs")),
   seurat_results = file.path(state_dir, paste0(project_id, "_10_seurat_results.qs")),
   session_info = file.path(state_dir, paste0(project_id, "_11_session_info.txt")),
-  annotation_dir = annotation_dir
+  annotation_dir = annotation_dir,
+  metrics_dir = metrics_dir
 )
 
 multiplet_rates_10x <- data.frame(
@@ -163,6 +182,35 @@ add_sample_metadata <- function(obj, one_meta) {
     obj$sample <- one_meta$sample_id[1]
   }
   obj
+}
+
+count_cells_by_sample <- function(obj, sample_col = "sample") {
+  counts <- table(as.character(obj[[sample_col]][, 1]))
+  data.frame(
+    sample = names(counts),
+    cell_count = as.integer(counts),
+    stringsAsFactors = FALSE
+  )
+}
+
+build_doubletfinder_cell_count_table <- function(obj_before, obj_after) {
+  before_counts <- count_cells_by_sample(obj_before)
+  colnames(before_counts)[2] <- "cells_before_doubletfinder"
+  after_counts <- count_cells_by_sample(obj_after)
+  colnames(after_counts)[2] <- "cells_after_doubletfinder"
+  count_table <- merge(before_counts, after_counts, by = "sample", all = TRUE, sort = FALSE)
+  count_table$cells_before_doubletfinder[is.na(count_table$cells_before_doubletfinder)] <- 0L
+  count_table$cells_after_doubletfinder[is.na(count_table$cells_after_doubletfinder)] <- 0L
+  count_table$cells_removed_by_doubletfinder <-
+    count_table$cells_before_doubletfinder - count_table$cells_after_doubletfinder
+  count_table
+}
+
+print_doubletfinder_cell_counts <- function(count_table) {
+  cat("\nPer-sample cell counts before DoubletFinder:\n")
+  print(count_table[, c("sample", "cells_before_doubletfinder")], row.names = FALSE)
+  cat("\nPer-sample cell counts after DoubletFinder:\n")
+  print(count_table[, c("sample", "cells_after_doubletfinder")], row.names = FALSE)
 }
 
 # 当 dims_use 未手动设置时，自动根据拐点法估计一个最小可用 PC 数。
@@ -286,8 +334,13 @@ remove_doublets_by_sample <- function(obj) {
     singlet_merged <- merge(h.singlet[[1]], y = h.singlet[-1], add.cell.ids = names(h.singlet))
   }
   singlet_merged <- JoinLayers(singlet_merged)
+  count_table <- build_doubletfinder_cell_count_table(obj, singlet_merged)
+  print_doubletfinder_cell_counts(count_table)
   cleanup_vars(c("h", "h.singlet", "sample_obj"), envir = environment())
-  singlet_merged
+  list(
+    obj = singlet_merged,
+    cell_counts = count_table
+  )
 }
 
 run_contamination_correction <- function(object_list) {
@@ -296,7 +349,7 @@ run_contamination_correction <- function(object_list) {
   }
   if (identical(contamination_method, "decontx")) {
     require_or_stop("celda")
-    require_or_stop("SingleCellExperiment")
+    require_version_gte("SingleCellExperiment")
     corrected <- lapply(names(object_list), function(n) {
       obj <- object_list[[n]]
       sce <- SingleCellExperiment::SingleCellExperiment(
@@ -383,9 +436,18 @@ read_one_sample <- function(sample_id, path) {
 
 # ---- 05. DoubletFinder module ----
 # obj_qc <- qread_or_stop(state_paths$obj_qc, "obj_qc")
-# obj_singlet_merged_raw <- if (run_doubletfinder) remove_doublets_by_sample(obj_qc) else obj_qc
+# if (run_doubletfinder) {
+#   doubletfinder_output <- remove_doublets_by_sample(obj_qc)
+#   obj_singlet_merged_raw <- doubletfinder_output$obj
+#   doubletfinder_cell_counts <- doubletfinder_output$cell_counts
+# } else {
+#   obj_singlet_merged_raw <- obj_qc
+#   doubletfinder_cell_counts <- build_doubletfinder_cell_count_table(obj_qc, obj_qc)
+#   print_doubletfinder_cell_counts(doubletfinder_cell_counts)
+# }
+# data.table::fwrite(doubletfinder_cell_counts, file = state_paths$doubletfinder_cell_counts_csv)
 # qsave(obj_singlet_merged_raw, state_paths$obj_singlet_merged_raw)
-# cleanup_vars(c("obj_qc", "obj_singlet_merged_raw"))
+# cleanup_vars(c("obj_qc", "obj_singlet_merged_raw", "doubletfinder_output", "doubletfinder_cell_counts"))
 
 # ---- 06. re-preprocessing module for merged singlets ----
 # 对去双后的合并对象重新跑一次标准流程，后续各整合模块都从这里继续分叉。
@@ -425,7 +487,7 @@ read_one_sample <- function(sample_id, path) {
 # cleanup_vars(c("obj_rpca", "dims_rpca"))
 
 # ---- 09. Harmony module ----
-# require_or_stop("harmony")
+# require_version_gte("harmony")
 # obj_harmony <- qread_or_stop(state_paths$obj_singlet_merged_raw, "obj_singlet_merged_raw")
 # obj_harmony$sample <- obj_harmony$sample_id
 # obj_harmony <- preprocess_standard(obj_harmony)
@@ -462,8 +524,8 @@ read_one_sample <- function(sample_id, path) {
 
 # ---- 11. SingleR initial annotation module ----
 # 这里默认针对 res0.1 的聚类结果做初步自动注释，并把结果保存到 annotations 目录。
-# require_or_stop("SingleR")
-# require_or_stop("SingleCellExperiment")
+# require_version_gte("SingleR")
+# require_version_gte("SingleCellExperiment")
 # if (is.null(singleR_reference)) {
 #   stop("Set singleR_reference to a valid reference object before running the SingleR module.", call. = FALSE)
 # }
