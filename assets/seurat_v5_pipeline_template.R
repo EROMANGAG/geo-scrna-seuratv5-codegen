@@ -175,17 +175,25 @@ add_sample_metadata <- function(obj, one_meta) {
     stop("add_sample_metadata() expects exactly one metadata row per sample.", call. = FALSE)
   }
   for (nm in colnames(one_meta)) {
-    obj[[nm]] <- one_meta[[nm]][1]
+    obj <- AddMetaData(
+      object = obj,
+      metadata = rep(one_meta[[nm]][1], ncol(obj)),
+      col.name = nm
+    )
   }
-  if ("sample_id" %in% colnames(one_meta)) {
-    obj$sample_id <- one_meta$sample_id[1]
-    obj$sample <- one_meta$sample_id[1]
+  if ("sample_id" %in% colnames(one_meta) && !"sample" %in% colnames(one_meta)) {
+    obj <- AddMetaData(
+      object = obj,
+      metadata = rep(one_meta$sample_id[1], ncol(obj)),
+      col.name = "sample"
+    )
   }
   obj
 }
 
 count_cells_by_sample <- function(obj, sample_col = "sample") {
-  counts <- table(as.character(obj[[sample_col]][, 1]))
+  sample_values <- FetchData(object = obj, vars = sample_col, clean = FALSE)[[sample_col]]
+  counts <- table(as.character(sample_values))
   data.frame(
     sample = names(counts),
     cell_count = as.integer(counts),
@@ -215,7 +223,7 @@ print_doubletfinder_cell_counts <- function(count_table) {
 
 # 当 dims_use 未手动设置时，自动根据拐点法估计一个最小可用 PC 数。
 calculate_min_pc <- function(obj, reduction = "harmony") {
-  stdv <- obj[[reduction]]@stdev
+  stdv <- Stdev(object = obj, reduction = reduction)
   percent_stdv <- (stdv / sum(stdv)) * 100
   cumulative <- cumsum(percent_stdv)
   co1 <- which(cumulative > 90 & percent_stdv < 5)[1]
@@ -301,9 +309,9 @@ run_doubletfinder_one_sample <- function(o) {
   bcmvn <- DoubletFinder::find.pK(sweep.stats)
   pK_bcmvn <- as.numeric(as.vector(bcmvn$pK[which.max(bcmvn$BCmetric)]))
 
-  homotypic.prop <- DoubletFinder::modelHomotypic(o$seurat_clusters)
-  multiplet_rate <- estimate_multiplet_rate(nrow(o@meta.data))
-  nExp.poi <- round(multiplet_rate * nrow(o@meta.data))
+  homotypic.prop <- DoubletFinder::modelHomotypic(as.character(Idents(o)))
+  multiplet_rate <- estimate_multiplet_rate(ncol(o))
+  nExp.poi <- round(multiplet_rate * ncol(o))
   nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
 
   DoubletFinder::doubletFinder(
@@ -323,7 +331,16 @@ remove_doublets_by_sample <- function(obj) {
 
   h.singlet <- lapply(names(sample_obj), function(nm) {
     o <- h[[nm]]
-    colnames(o@meta.data)[grepl("DF.classifications", colnames(o@meta.data))] <- "doublet_finder"
+    df_col <- grep("DF.classifications", colnames(o[[]]), value = TRUE)[1]
+    if (is.na(df_col)) {
+      stop(sprintf("DoubletFinder classification column was not found for sample '%s'.", nm), call. = FALSE)
+    }
+    o <- AddMetaData(
+      object = o,
+      metadata = FetchData(object = o, vars = df_col, clean = FALSE)[[df_col]],
+      col.name = "doublet_finder"
+    )
+    o[[df_col]] <- NULL
     subset(o, subset = doublet_finder == "Singlet")
   })
   names(h.singlet) <- names(sample_obj)
@@ -538,10 +555,10 @@ read_one_sample <- function(sample_id, path) {
 # }
 # obj_singleR <- qread_or_stop(singleR_input_path, singleR_annotation_input_key)
 # cluster_col <- get_singleR_cluster_column(singleR_annotation_input_key)
-# if (!cluster_col %in% colnames(obj_singleR@meta.data)) {
+# if (!cluster_col %in% colnames(obj_singleR[[]])) {
 #   stop(sprintf("Cluster column '%s' was not found in the selected object.", cluster_col), call. = FALSE)
 # }
-# cluster_ids <- as.character(obj_singleR[[cluster_col]][, 1])
+# cluster_ids <- as.character(FetchData(object = obj_singleR, vars = cluster_col, clean = FALSE)[[cluster_col]])
 # sce_singleR <- as.SingleCellExperiment(obj_singleR, assay = "RNA")
 # pred_singleR <- SingleR::SingleR(
 #   test = sce_singleR,
@@ -587,7 +604,7 @@ read_one_sample <- function(sample_id, path) {
 # print(seurat_results)
 # stopifnot(length(seurat_results) >= 1)
 # stopifnot(all(vapply(seurat_results, inherits, logical(1), what = "Seurat")))
-# stopifnot(all(vapply(seurat_results, function(x) "umap" %in% names(x@reductions), logical(1))))
+# stopifnot(all(vapply(seurat_results, function(x) "umap" %in% Reductions(x), logical(1))))
 # stopifnot(file.exists(state_paths$seurat_results))
 # writeLines(capture.output(sessionInfo()), con = state_paths$session_info)
 # cleanup_vars(c("seurat_results"))

@@ -295,6 +295,20 @@ At minimum, generated code should check the versions of the main packages it act
 - If a helper or code block was originally written for Seurat v4 or older, rewrite it to v5-compatible layer semantics before emitting the final script.
 - Keep optional-module checks aligned with the same baseline; for example, `harmony`, `SingleR`, and `SingleCellExperiment` should also be checked before their modules run.
 
+## Seurat object access rules
+
+When generated code needs to pull data out of a Seurat object, prefer stable accessors from Seurat, SeuratObject, or related plotting helpers instead of direct slot access.
+
+- Prefer `FetchData()` for cell-level metadata or per-cell reduction values that should become a data frame.
+- Prefer `AddMetaData()` when writing cell-level metadata back into a Seurat object.
+- Prefer `LayerData()` for assay-layer matrices.
+- Prefer `Stdev(object = ..., reduction = ...)` instead of `obj[[reduction]]@stdev`.
+- Prefer `Reductions(object)` instead of `names(obj@reductions)`.
+- Prefer `ncol(obj)` or `length(Cells(obj))` for cell counts instead of `nrow(obj@meta.data)`.
+- Prefer `colnames(obj[[]])` or `FetchData()` for metadata discovery instead of `colnames(obj@meta.data)`.
+- Prefer `Idents()` when the workflow needs the current clustering identities.
+- Avoid direct `@slot` access unless there is no stable exported accessor for the needed value.
+
 ## QC defaults
 
 Use explicit, editable defaults unless the GEO article gives specific values:
@@ -336,7 +350,7 @@ Create a helper function that follows this logic. When `dims_use` is `NULL`, use
 
 ```r
 calculate_min_pc <- function(obj, reduction = "harmony") {
-  stdv <- obj[[reduction]]@stdev
+  stdv <- Stdev(object = obj, reduction = reduction)
   percent_stdv <- (stdv / sum(stdv)) * 100
   cumulative <- cumsum(percent_stdv)
   co1 <- which(cumulative > 90 & percent_stdv < 5)[1]
@@ -426,7 +440,7 @@ pred_singleR <- SingleR::SingleR(
   test = sce_singleR,
   ref = singleR_reference,
   labels = SummarizedExperiment::colData(singleR_reference)[[singleR_label_field]],
-  clusters = obj_singleR[[cluster_col]][, 1],
+  clusters = FetchData(object = obj_singleR, vars = cluster_col, clean = FALSE)[[cluster_col]],
   assay.type.test = 1
 )
 ```
